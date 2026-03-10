@@ -505,13 +505,32 @@ set_wva_logging_level() {
 # Detect which InferencePool API group is in use in the cluster (v1 vs v1alpha2).
 # Sets DETECTED_POOL_GROUP to inference.networking.k8s.io or inference.networking.x-k8s.io
 # so WVA can be upgraded to watch the correct group (required for scale-from-zero datastore).
+# Retries up to POOL_DETECT_RETRIES times (default 6, 10s apart) to handle the race where
+# InferencePool instances haven't been created yet after helmfile deploy.
 detect_inference_pool_api_group() {
     DETECTED_POOL_GROUP=""
-    if [ -n "$(kubectl get inferencepools.inference.networking.k8s.io -A -o name --request-timeout=10s 2>/dev/null | head -1)" ]; then
-        DETECTED_POOL_GROUP="inference.networking.k8s.io"
-    elif [ -n "$(kubectl get inferencepools.inference.networking.x-k8s.io -A -o name --request-timeout=10s 2>/dev/null | head -1)" ]; then
-        DETECTED_POOL_GROUP="inference.networking.x-k8s.io"
+    local max_retries=${POOL_DETECT_RETRIES:-6}
+    local retry_interval_s=10
+    local attempt=0
+    # Search in the target namespace first (avoids cluster-wide RBAC issues), then fall back to -A.
+    local ns_flag="-A"
+    if [ -n "${LLMD_NS:-}" ]; then
+        ns_flag="-n $LLMD_NS"
     fi
+    while [ $attempt -lt $max_retries ]; do
+        if [ -n "$(kubectl get inferencepools.inference.networking.k8s.io $ns_flag -o name --request-timeout=10s 2>/dev/null | head -1)" ]; then
+            DETECTED_POOL_GROUP="inference.networking.k8s.io"
+            return
+        elif [ -n "$(kubectl get inferencepools.inference.networking.x-k8s.io $ns_flag -o name --request-timeout=10s 2>/dev/null | head -1)" ]; then
+            DETECTED_POOL_GROUP="inference.networking.x-k8s.io"
+            return
+        fi
+        attempt=$((attempt + 1))
+        if [ $attempt -lt $max_retries ]; then
+            log_info "InferencePool not found yet, retrying in ${retry_interval_s}s ($attempt/$max_retries)..."
+            sleep $retry_interval_s
+        fi
+    done
 }
 
 deploy_wva_controller() {
@@ -555,6 +574,7 @@ deploy_wva_controller() {
         --set wva.prometheus.tls.insecureSkipVerify=$SKIP_TLS_VERIFY \
         --set wva.namespaceScoped=$NAMESPACE_SCOPED \
         --set wva.metrics.secure=$WVA_METRICS_SECURE \
+        --set wva.scaleToZero=${ENABLE_SCALE_TO_ZERO:-false} \
         ${CONTROLLER_INSTANCE:+--set wva.controllerInstance=$CONTROLLER_INSTANCE} \
         ${POOL_GROUP:+--set wva.poolGroup=$POOL_GROUP} \
         ${KV_SPARE_TRIGGER:+--set wva.capacityScaling.default.kvSpareTrigger=$KV_SPARE_TRIGGER} \
@@ -1073,6 +1093,12 @@ deploy_llm_d_infrastructure() {
 
 deploy_keda() {
     log_info "Deploying KEDA (scaler backend)..."
+
+    # Skip install if KEDA ScaledObject CRD already exists (pre-installed on cluster)
+    if kubectl get crd scaledobjects.keda.sh >/dev/null 2>&1; then
+        log_success "KEDA is already installed on this cluster — skipping helm install"
+        return
+    fi
 
     kubectl create namespace "$KEDA_NAMESPACE" --dry-run=client -o yaml | kubectl apply -f -
 
@@ -1689,12 +1715,9 @@ main() {
     fi
 
     # Deploy scaler backend: KEDA or Prometheus Adapter
-    # KEDA in this script is for kind-emulator e2e only; on OpenShift use the platform CMA / Prometheus Adapter.
+    # KEDA is supported on all environments. On OpenShift and CKS it is typically
+    # pre-installed on the cluster; deploy_keda will detect and skip the install.
     if [ "$SCALER_BACKEND" = "keda" ]; then
-        if [ "$ENVIRONMENT" != "kind-emulator" ]; then
-            log_error "KEDA scaler backend is only supported for kind-emulator environment (ENVIRONMENT=kind-emulator). Current: ENVIRONMENT=$ENVIRONMENT. Use SCALER_BACKEND=prometheus-adapter or run with ENVIRONMENT=kind-emulator."
-            exit 1
-        fi
         deploy_keda
     elif [ "$DEPLOY_PROMETHEUS_ADAPTER" = "true" ]; then
         deploy_prometheus_adapter

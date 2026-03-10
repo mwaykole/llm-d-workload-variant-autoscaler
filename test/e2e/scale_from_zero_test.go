@@ -35,10 +35,9 @@ var _ = Describe("Scale-From-Zero Feature", Label("smoke", "full"), Ordered, fun
 	)
 
 	BeforeAll(func() {
-		// Scale-from-zero is not validated on OpenShift (POOL_GROUP / flow control setup differs; HPA minReplicas=0 often unsupported).
-		if cfg.Environment == "openshift" {
-			Skip("Scale-from-zero test is disabled on OpenShift")
-		}
+		// Scale-from-zero requires GIE flow control, InferenceObjective, and KEDA
+		// (ScaledObject with minReplicas=0). KEDA must be pre-installed on the cluster.
+		// Only kind-emulator installs KEDA at runtime via install.sh.
 
 		// Note: InferencePool should already exist from infra-only deployment
 		// We no longer create InferencePools in individual tests
