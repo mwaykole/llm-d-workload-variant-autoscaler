@@ -118,6 +118,8 @@ QUEUE_SPARE_TRIGGER=${QUEUE_SPARE_TRIGGER:-""}
 # When keda: do not deploy Prometheus Adapter; deploy KEDA instead (ScaledObjects, external metrics API)
 SCALER_BACKEND=${SCALER_BACKEND:-prometheus-adapter}
 KEDA_NAMESPACE=${KEDA_NAMESPACE:-keda-system}
+# Pin KEDA chart version for reproducible installs (only used when deploy_keda installs from helm)
+KEDA_CHART_VERSION=${KEDA_CHART_VERSION:-2.19.0}
 
 # Environment-related variables
 SCRIPT_DIR=$(cd $(dirname "${BASH_SOURCE[0]}") && pwd)
@@ -513,15 +515,22 @@ detect_inference_pool_api_group() {
     local retry_interval_s=10
     local attempt=0
     # Search in the target namespace first (avoids cluster-wide RBAC issues), then fall back to -A.
-    local ns_flag="-A"
-    if [ -n "${LLMD_NS:-}" ]; then
-        ns_flag="-n $LLMD_NS"
-    fi
     while [ $attempt -lt $max_retries ]; do
-        if [ -n "$(kubectl get inferencepools.inference.networking.k8s.io $ns_flag -o name --request-timeout=10s 2>/dev/null | head -1)" ]; then
+        # Try namespace-scoped first if LLMD_NS is set
+        if [ -n "${LLMD_NS:-}" ]; then
+            if [ -n "$(kubectl get inferencepools.inference.networking.k8s.io -n "$LLMD_NS" -o name --request-timeout=10s 2>/dev/null | head -1)" ]; then
+                DETECTED_POOL_GROUP="inference.networking.k8s.io"
+                return
+            elif [ -n "$(kubectl get inferencepools.inference.networking.x-k8s.io -n "$LLMD_NS" -o name --request-timeout=10s 2>/dev/null | head -1)" ]; then
+                DETECTED_POOL_GROUP="inference.networking.x-k8s.io"
+                return
+            fi
+        fi
+        # Fall back to cluster-wide search
+        if [ -n "$(kubectl get inferencepools.inference.networking.k8s.io -A -o name --request-timeout=10s 2>/dev/null | head -1)" ]; then
             DETECTED_POOL_GROUP="inference.networking.k8s.io"
             return
-        elif [ -n "$(kubectl get inferencepools.inference.networking.x-k8s.io $ns_flag -o name --request-timeout=10s 2>/dev/null | head -1)" ]; then
+        elif [ -n "$(kubectl get inferencepools.inference.networking.x-k8s.io -A -o name --request-timeout=10s 2>/dev/null | head -1)" ]; then
             DETECTED_POOL_GROUP="inference.networking.x-k8s.io"
             return
         fi
@@ -574,7 +583,7 @@ deploy_wva_controller() {
         --set wva.prometheus.tls.insecureSkipVerify=$SKIP_TLS_VERIFY \
         --set wva.namespaceScoped=$NAMESPACE_SCOPED \
         --set wva.metrics.secure=$WVA_METRICS_SECURE \
-        --set wva.scaleToZero=${ENABLE_SCALE_TO_ZERO:-false} \
+        --set wva.scaleToZero=$ENABLE_SCALE_TO_ZERO \
         ${CONTROLLER_INSTANCE:+--set wva.controllerInstance=$CONTROLLER_INSTANCE} \
         ${POOL_GROUP:+--set wva.poolGroup=$POOL_GROUP} \
         ${KV_SPARE_TRIGGER:+--set wva.capacityScaling.default.kvSpareTrigger=$KV_SPARE_TRIGGER} \
@@ -1098,10 +1107,17 @@ deploy_llm_d_infrastructure() {
 deploy_keda() {
     log_info "Deploying KEDA (scaler backend)..."
 
-    # Skip install if KEDA ScaledObject CRD already exists (pre-installed on cluster)
+    # Skip install if KEDA is already fully operational on the cluster.
+    # Check CRD + operator pods + external metrics APIService to avoid false positives
+    # from stale CRDs left behind after a prior uninstall.
     if kubectl get crd scaledobjects.keda.sh >/dev/null 2>&1; then
-        log_success "KEDA is already installed on this cluster — skipping helm install"
-        return
+        if kubectl get pods -A -l app.kubernetes.io/name=keda-operator 2>/dev/null | grep -q Running; then
+            if kubectl get apiservice v1beta1.external.metrics.k8s.io >/dev/null 2>&1; then
+                log_success "KEDA CRD, operator, and metrics APIService detected — skipping helm install"
+                return
+            fi
+        fi
+        log_warning "KEDA ScaledObject CRD found but operator or metrics APIService not detected; proceeding with helm install"
     fi
 
     kubectl create namespace "$KEDA_NAMESPACE" --dry-run=client -o yaml | kubectl apply -f -
@@ -1110,6 +1126,7 @@ deploy_keda() {
     helm repo update
 
     if ! helm upgrade -i keda kedacore/keda \
+        --version "$KEDA_CHART_VERSION" \
         -n "$KEDA_NAMESPACE" \
         --set prometheus.metricServer.enabled=true \
         --set prometheus.operator.enabled=true \

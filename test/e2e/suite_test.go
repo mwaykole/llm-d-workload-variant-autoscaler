@@ -53,8 +53,10 @@ var _ = BeforeSuite(func() {
 	By("Loading configuration from environment")
 	cfg = LoadConfigFromEnv()
 
-	// KEDA is supported on all environments — pre-installed on OCP (CMA operator)
-	// and CKS (helm), installed at runtime on kind-emulator via install.sh.
+	// KEDA is supported on all environments — pre-installed on OCP (Custom Metrics
+	// Autoscaler operator, namespace: openshift-keda) and CKS (helm, namespace: keda),
+	// installed at runtime on kind-emulator via install.sh (namespace: keda-system).
+	// Set KEDA_NAMESPACE accordingly when running on OCP or CKS.
 
 	GinkgoWriter.Printf("=== E2E Test Configuration ===\n")
 	GinkgoWriter.Printf("Environment: %s\n", cfg.Environment)

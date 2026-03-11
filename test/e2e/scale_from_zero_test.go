@@ -25,7 +25,8 @@ import (
 // Scale-from-zero test validates that the WVA controller correctly detects pending requests
 // and scales up deployments from zero replicas. Requires GIE queuing (ENABLE_EXPERIMENTAL_FLOW_CONTROL_LAYER
 // on EPP and an InferenceObjective); deploy with E2E_TESTS_ENABLED=true or ENABLE_SCALE_TO_ZERO=true.
-// Uses KEDA ScaledObject when standard HPA rejects minReplicas=0 (e.g. OpenShift).
+// On platforms without the HPAScaleToZero feature gate (e.g. OpenShift), set SCALER_BACKEND=keda
+// so the test uses a KEDA ScaledObject (which supports minReplicas=0) instead of a native HPA.
 var _ = Describe("Scale-From-Zero Feature", Label("smoke", "full"), Ordered, func() {
 	var (
 		poolName         = "scale-from-zero-pool"
@@ -35,9 +36,14 @@ var _ = Describe("Scale-From-Zero Feature", Label("smoke", "full"), Ordered, fun
 	)
 
 	BeforeAll(func() {
-		// Scale-from-zero requires GIE flow control, InferenceObjective, and KEDA
-		// (ScaledObject with minReplicas=0). KEDA must be pre-installed on the cluster.
-		// Only kind-emulator installs KEDA at runtime via install.sh.
+		// Scale-from-zero requires GIE flow control and an InferenceObjective.
+		// On platforms where HPA rejects minReplicas=0 (e.g. OpenShift without
+		// HPAScaleToZero feature gate), SCALER_BACKEND=keda must be set so the
+		// test creates a KEDA ScaledObject instead of a native HPA.
+		if cfg.ScalerBackend != "keda" && !cfg.ScaleToZeroEnabled {
+			Skip("Scale-from-zero requires SCALER_BACKEND=\"keda\" or ENABLE_SCALE_TO_ZERO=true; " +
+				"current configuration does not support HPA minReplicas=0")
+		}
 
 		// Note: InferencePool should already exist from infra-only deployment
 		// We no longer create InferencePools in individual tests
