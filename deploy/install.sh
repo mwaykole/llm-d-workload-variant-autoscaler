@@ -1061,8 +1061,12 @@ deploy_llm_d_infrastructure() {
         fi
     fi
 
-    log_info "Waiting for llm-d components to initialize..."
-    kubectl wait --for=condition=Available deployment --all -n $LLMD_NS --timeout=60s || \
+    # Model-serving pods (vLLM) can take several minutes to download and load
+    # large models into GPU memory. The startupProbe allows up to 30m, so the
+    # wait timeout here must be long enough for the model to finish loading.
+    local DEPLOY_WAIT_TIMEOUT="${DEPLOY_WAIT_TIMEOUT:-600s}"
+    log_info "Waiting for llm-d components to initialize (timeout=${DEPLOY_WAIT_TIMEOUT})..."
+    kubectl wait --for=condition=Available deployment --all -n $LLMD_NS --timeout="$DEPLOY_WAIT_TIMEOUT" || \
         log_warning "llm-d components are not ready yet - check 'kubectl get pods -n $LLMD_NS'"
 
     # Align WVA with the InferencePool API group in use (scale-from-zero requires WVA to watch the same group).
