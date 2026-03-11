@@ -507,39 +507,18 @@ set_wva_logging_level() {
 # Detect which InferencePool API group is in use in the cluster (v1 vs v1alpha2).
 # Sets DETECTED_POOL_GROUP to inference.networking.k8s.io or inference.networking.x-k8s.io
 # so WVA can be upgraded to watch the correct group (required for scale-from-zero datastore).
-# Retries up to POOL_DETECT_RETRIES times (default 6, 10s apart) to handle the race where
-# InferencePool instances haven't been created yet after helmfile deploy.
+# Uses kubectl api-resources to check which CRD is registered, avoiding the need to list
+# actual InferencePool instances (which requires RBAC and depends on creation timing).
 detect_inference_pool_api_group() {
     DETECTED_POOL_GROUP=""
-    local max_retries=${POOL_DETECT_RETRIES:-6}
-    local retry_interval_s=10
-    local attempt=0
-    # Search in the target namespace first (avoids cluster-wide RBAC issues), then fall back to -A.
-    while [ $attempt -lt $max_retries ]; do
-        # Try namespace-scoped first if LLMD_NS is set
-        if [ -n "${LLMD_NS:-}" ]; then
-            if [ -n "$(kubectl get inferencepools.inference.networking.k8s.io -n "$LLMD_NS" -o name --request-timeout=10s 2>/dev/null | head -1)" ]; then
-                DETECTED_POOL_GROUP="inference.networking.k8s.io"
-                return
-            elif [ -n "$(kubectl get inferencepools.inference.networking.x-k8s.io -n "$LLMD_NS" -o name --request-timeout=10s 2>/dev/null | head -1)" ]; then
-                DETECTED_POOL_GROUP="inference.networking.x-k8s.io"
-                return
-            fi
-        fi
-        # Fall back to cluster-wide search
-        if [ -n "$(kubectl get inferencepools.inference.networking.k8s.io -A -o name --request-timeout=10s 2>/dev/null | head -1)" ]; then
-            DETECTED_POOL_GROUP="inference.networking.k8s.io"
-            return
-        elif [ -n "$(kubectl get inferencepools.inference.networking.x-k8s.io -A -o name --request-timeout=10s 2>/dev/null | head -1)" ]; then
-            DETECTED_POOL_GROUP="inference.networking.x-k8s.io"
-            return
-        fi
-        attempt=$((attempt + 1))
-        if [ $attempt -lt $max_retries ]; then
-            log_info "InferencePool not found yet, retrying in ${retry_interval_s}s ($attempt/$max_retries)..."
-            sleep $retry_interval_s
-        fi
-    done
+    if kubectl api-resources --api-group=inference.networking.k8s.io 2>/dev/null | grep -q inferencepools; then
+        DETECTED_POOL_GROUP="inference.networking.k8s.io"
+        return
+    elif kubectl api-resources --api-group=inference.networking.x-k8s.io 2>/dev/null | grep -q inferencepools; then
+        DETECTED_POOL_GROUP="inference.networking.x-k8s.io"
+        return
+    fi
+    log_warning "InferencePool CRD not found in either API group"
 }
 
 deploy_wva_controller() {
