@@ -592,11 +592,11 @@ deploy_wva_controller() {
         --set wva.prometheus.tls.insecureSkipVerify=$SKIP_TLS_VERIFY \
         --set wva.namespaceScoped=$NAMESPACE_SCOPED \
         --set wva.metrics.secure=$WVA_METRICS_SECURE \
-        --wait \
-        --timeout=10m
         --set wva.scaleToZero=$ENABLE_SCALE_TO_ZERO \
         ${CONTROLLER_INSTANCE:+--set wva.controllerInstance=$CONTROLLER_INSTANCE} \
         ${POOL_GROUP:+--set wva.poolGroup=$POOL_GROUP} \
+        --wait \
+        --timeout=10m
         ${KV_SPARE_TRIGGER:+--set wva.capacityScaling.default.kvSpareTrigger=$KV_SPARE_TRIGGER} \
         ${QUEUE_SPARE_TRIGGER:+--set wva.capacityScaling.default.queueSpareTrigger=$QUEUE_SPARE_TRIGGER}
 
