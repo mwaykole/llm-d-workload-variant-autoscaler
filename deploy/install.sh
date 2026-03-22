@@ -572,6 +572,8 @@ deploy_wva_controller() {
         --set llmd.modelName=$LLM_D_MODELSERVICE_NAME \
         --set va.enabled=$DEPLOY_VA \
         --set va.accelerator=$ACCELERATOR_TYPE \
+        --wait \
+        --timeout=5m
         --set llmd.modelID=$MODEL_ID \
         --set va.sloTpot=$SLO_TPOT \
         --set va.sloTtft=$SLO_TTFT \
