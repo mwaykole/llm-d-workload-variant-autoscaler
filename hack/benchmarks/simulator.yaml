@@ -1,0 +1,40 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: vllm-simulator
+  namespace: default
+  labels:
+    app: vllm-simulator
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: vllm-simulator
+  template:
+    metadata:
+      labels:
+        app: vllm-simulator
+    spec:
+      containers:
+      - name: server
+        image: quay.io/llmd/llm-d-inference-sim:latest
+        command: ["/app/llm-d-inference-sim"]
+        args:
+        - "--model=unsloth/Meta-Llama-3.1-8B"
+        - "--port=8000"
+        - "--max-num-seqs=256"
+        ports:
+        - containerPort: 8000
+          name: http
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: vllm-simulator
+  namespace: default
+spec:
+  selector:
+    app: vllm-simulator
+  ports:
+  - port: 8000
+    targetPort: 8000

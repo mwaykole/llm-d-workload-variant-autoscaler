@@ -60,7 +60,14 @@ fi
 
 # Send requests in parallel batches (burst pattern)
 SENT=0
+MAX_CONCURRENT=500
+
 while [ $SENT -lt $TOTAL_REQUESTS ]; do
+  # Prevent fork bomb by limiting concurrent background jobs
+  while [ $(jobs -p | wc -l) -ge $MAX_CONCURRENT ]; do
+    sleep 0.1
+  done
+
   for i in $(seq 1 $BATCH_SIZE); do
     if [ $SENT -ge $TOTAL_REQUESTS ]; then break; fi
     (curl -s -o /dev/null --max-time $CURL_TIMEOUT -X POST $TARGET_URL \

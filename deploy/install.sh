@@ -1700,10 +1700,10 @@ main() {
     echo ""
 
     # Prompt for Gateway control plane installation
-    if [[ "$E2E_TESTS_ENABLED" == "false" ]]; then
-        prompt_gateway_installation
-    elif [[ -n "$INSTALL_GATEWAY_CTRLPLANE_ORIGINAL" ]]; then
+    if [[ -n "$INSTALL_GATEWAY_CTRLPLANE_ORIGINAL" ]]; then
         log_info "Using explicitly set INSTALL_GATEWAY_CTRLPLANE=$INSTALL_GATEWAY_CTRLPLANE"
+    elif [[ "$E2E_TESTS_ENABLED" == "false" ]]; then
+        prompt_gateway_installation
     else
         log_info "Enabling Gateway control plane installation for tests"
         export INSTALL_GATEWAY_CTRLPLANE="true"

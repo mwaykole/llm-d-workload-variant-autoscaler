@@ -468,3 +468,7 @@ mv $(1) $(1)-$(3) ;\
 } ;\
 ln -sf $(1)-$(3) $(1)
 endef
+
+.PHONY: test-benchmark-kind
+test-benchmark-kind: ## Run the automated benchmark suite on Kind
+	./hack/benchmarks/run-benchmark.sh kind $(SCENARIO) $(DURATION)

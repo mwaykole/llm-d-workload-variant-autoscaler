@@ -1,0 +1,30 @@
+name: scale-up-latency
+description: "Measures scale-up reaction time under sudden load spike"
+phases:
+  - name: baseline
+    duration: 2m
+    load:
+      rate: 0
+  - name: spike
+    duration: 5m
+    load:
+      rate: 20
+      strategy: burst
+      prompt_tokens: 128
+      output_tokens: 128
+  - name: sustained
+    duration: 5m
+    load:
+      rate: 15
+      strategy: constant
+  - name: cooldown
+    duration: 3m
+    load:
+      rate: 0
+metrics:
+  - scale_up_time_seconds
+  - scale_down_time_seconds
+  - p50_ttft_ms
+  - p99_ttft_ms
+  - max_replicas_reached
+  - overshoot_replicas
