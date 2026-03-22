@@ -574,8 +574,6 @@ deploy_wva_controller() {
         --set llmd.modelName=$LLM_D_MODELSERVICE_NAME \
         --set va.enabled=$DEPLOY_VA \
         --set va.accelerator=$ACCELERATOR_TYPE \
-        --wait \
-        --timeout=5m
         --set llmd.modelID=$MODEL_ID \
         --set va.sloTpot=$SLO_TPOT \
         --set va.sloTtft=$SLO_TTFT \
@@ -594,6 +592,8 @@ deploy_wva_controller() {
         --set wva.prometheus.tls.insecureSkipVerify=$SKIP_TLS_VERIFY \
         --set wva.namespaceScoped=$NAMESPACE_SCOPED \
         --set wva.metrics.secure=$WVA_METRICS_SECURE \
+        --wait \
+        --timeout=10m
         --set wva.scaleToZero=$ENABLE_SCALE_TO_ZERO \
         ${CONTROLLER_INSTANCE:+--set wva.controllerInstance=$CONTROLLER_INSTANCE} \
         ${POOL_GROUP:+--set wva.poolGroup=$POOL_GROUP} \
