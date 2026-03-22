@@ -17,11 +17,11 @@ if [ "$PLATFORM" == "kind" ]; then
     echo "Setting up Kind cluster and deploying WVA..."
     cd "${ROOT_DIR}"
     # Clean up existing cluster if any
-    # make destroy-kind-cluster || true
-    # make create-kind-cluster
-        export INSTALL_GATEWAY_CTRLPLANE=true
-        export CREATE_CLUSTER=false
-        make deploy-wva-emulated-on-kind
+    make destroy-kind-cluster || true
+    make create-kind-cluster
+    export INSTALL_GATEWAY_CTRLPLANE=true
+    export CREATE_CLUSTER=false
+    make deploy-wva-emulated-on-kind
 else
     echo "OpenShift not yet implemented in Phase 1."
     exit 1
