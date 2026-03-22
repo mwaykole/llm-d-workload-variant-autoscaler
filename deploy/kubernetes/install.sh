@@ -122,7 +122,7 @@ deploy_prometheus_stack() {
         --set prometheus.prometheusSpec.web.tlsConfig.keySecret.name=$PROMETHEUS_SECRET_NAME \
         --set prometheus.prometheusSpec.web.tlsConfig.keySecret.key=tls.key \
         --set grafana.enabled=true \
-        --set grafana.adminPassword=admin
+        --set grafana.adminPassword=admin \
         --set alertmanager.enabled=false \
         --timeout=10m \
         --wait
