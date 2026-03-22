@@ -569,6 +569,8 @@ deploy_wva_controller() {
         --set wva.image.tag=$WVA_IMAGE_TAG \
         --set wva.imagePullPolicy=$WVA_IMAGE_PULL_POLICY \
         --set wva.baseName=$WELL_LIT_PATH_NAME \
+        --set wva.prometheus.monitoringNamespace=$MONITORING_NAMESPACE \
+        --set llmd.namespace=$LLM_D_NS \
         --set llmd.modelName=$LLM_D_MODELSERVICE_NAME \
         --set va.enabled=$DEPLOY_VA \
         --set va.accelerator=$ACCELERATOR_TYPE \
