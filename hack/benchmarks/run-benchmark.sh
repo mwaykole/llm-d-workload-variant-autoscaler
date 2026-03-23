@@ -27,7 +27,9 @@ if [ "$PLATFORM" == "kind" ]; then
     # Import llm-d dashboard into Grafana
     echo "Importing llm-d dashboard into Grafana..."
     curl -sO https://raw.githubusercontent.com/llm-d/llm-d/main/docs/monitoring/grafana/dashboards/llm-d-dashboard.json
-    mv llm-d-dashboard.json "${ROOT_DIR}/llm-d-dashboard.json"
+    if [ "$(pwd)/llm-d-dashboard.json" != "${ROOT_DIR}/llm-d-dashboard.json" ]; then
+        mv llm-d-dashboard.json "${ROOT_DIR}/llm-d-dashboard.json"
+    fi
     kubectl create configmap llm-d-dashboard --from-file=llm-d-dashboard.json="${ROOT_DIR}/llm-d-dashboard.json" -n workload-variant-autoscaler-monitoring
     kubectl label configmap llm-d-dashboard grafana_dashboard=1 -n workload-variant-autoscaler-monitoring
 else
