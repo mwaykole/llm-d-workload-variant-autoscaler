@@ -26,7 +26,7 @@ if [ "$PLATFORM" == "kind" ]; then
     
     # Import llm-d dashboard into Grafana
     echo "Importing llm-d dashboard into Grafana..."
-    curl -sO https://raw.githubusercontent.com/llm-d/llm-d/main/docs/monitoring/grafana/dashboards/llm-d-dashboard.json
+    curl -s -o llm-d-dashboard.json https://raw.githubusercontent.com/llm-d/llm-d/main/docs/monitoring/grafana/dashboards/llm-d-vllm-overview.json
     if [ "$(pwd)/llm-d-dashboard.json" != "${ROOT_DIR}/llm-d-dashboard.json" ]; then
         mv llm-d-dashboard.json "${ROOT_DIR}/llm-d-dashboard.json"
     fi
