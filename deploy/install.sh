@@ -910,8 +910,8 @@ deploy_llm_d_infrastructure() {
       log_info "Deploying llm-d-inference-simulator..."
         yq eval ".decode.containers[0].image = \"$LLM_D_INFERENCE_SIM_IMG_REPO:$LLM_D_INFERENCE_SIM_IMG_TAG\" | \
                  .prefill.containers[0].image = \"$LLM_D_INFERENCE_SIM_IMG_REPO:$LLM_D_INFERENCE_SIM_IMG_TAG\" | \
-                 .decode.containers[0].args = [\"--time-to-first-token=$TTFT_AVERAGE_LATENCY_MS\", \"--inter-token-latency=$ITL_AVERAGE_LATENCY_MS\"] | \
-                 .prefill.containers[0].args = [\"--time-to-first-token=$TTFT_AVERAGE_LATENCY_MS\", \"--inter-token-latency=$ITL_AVERAGE_LATENCY_MS\"]" \
+                 .decode.containers[0].args = [\"--time-to-first-token=${TTFT_AVERAGE_LATENCY_MS}ms\", \"--inter-token-latency=${ITL_AVERAGE_LATENCY_MS}ms\"] | \
+                 .prefill.containers[0].args = [\"--time-to-first-token=${TTFT_AVERAGE_LATENCY_MS}ms\", \"--inter-token-latency=${ITL_AVERAGE_LATENCY_MS}ms\"]" \
                  -i "$LLM_D_MODELSERVICE_VALUES"
     else
         log_info "Skipping llm-d-inference-simulator deployment (DEPLOY_LLM_D_INFERENCE_SIM=false)"

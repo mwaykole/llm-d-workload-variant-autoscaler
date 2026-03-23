@@ -21,7 +21,14 @@ if [ "$PLATFORM" == "kind" ]; then
     make create-kind-cluster
     export INSTALL_GATEWAY_CTRLPLANE=true
     export CREATE_CLUSTER=false
+    export VLLM_MAX_NUM_SEQS=8
     make deploy-wva-emulated-on-kind
+    
+    # Import llm-d dashboard into Grafana
+    echo "Importing llm-d dashboard into Grafana..."
+    curl -sO https://raw.githubusercontent.com/llm-d/llm-d/main/docs/monitoring/grafana/dashboards/llm-d-dashboard.json
+    kubectl create configmap llm-d-dashboard --from-file=llm-d-dashboard.json=llm-d-dashboard.json -n workload-variant-autoscaler-monitoring
+    kubectl label configmap llm-d-dashboard grafana_dashboard=1 -n workload-variant-autoscaler-monitoring
 else
     echo "OpenShift not yet implemented in Phase 1."
     exit 1
