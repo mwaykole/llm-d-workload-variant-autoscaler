@@ -79,8 +79,14 @@ TOKEN_JSON=$(curl -s -X POST -u admin:admin -H "Content-Type: application/json" 
 GRAFANA_TOKEN=$(echo $TOKEN_JSON | jq -r '.key')
 
 # Wait for dashboard to be provisioned
-sleep 5
+echo "Waiting for Grafana dashboard to be provisioned..."
+sleep 15
 DASHBOARD_UID=$(curl -s -u admin:admin http://localhost:3000/api/search | jq -r '.[] | select(.title=="llm-d dashboard") | .uid')
+
+if [ -z "$DASHBOARD_UID" ] || [ "$DASHBOARD_UID" == "null" ]; then
+    echo "Dashboard not found by title, trying to find by uid..."
+    DASHBOARD_UID=$(curl -s -u admin:admin http://localhost:3000/api/search | jq -r '.[] | select(.uid=="llm-d-dashboard") | .uid')
+fi
 
 if [ -n "$DASHBOARD_UID" ] && [ "$DASHBOARD_UID" != "null" ]; then
     echo "Found dashboard UID: $DASHBOARD_UID"
