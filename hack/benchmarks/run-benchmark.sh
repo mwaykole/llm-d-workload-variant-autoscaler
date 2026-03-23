@@ -80,7 +80,11 @@ GRAFANA_TOKEN=$(echo $TOKEN_JSON | jq -r '.key')
 
 # Wait for dashboard to be provisioned
 echo "Waiting for Grafana dashboard to be provisioned..."
-sleep 15
+sleep 30
+# Create dashboard manually via API to guarantee it exists
+DASHBOARD_JSON=$(cat llm-d-dashboard.json | jq '.id = null | .uid = "llm-d-dashboard"')
+curl -s -X POST -u admin:admin -H "Content-Type: application/json" -d "{\"dashboard\": ${DASHBOARD_JSON}, \"overwrite\": true}" http://localhost:3000/api/dashboards/db > /dev/null || true
+
 DASHBOARD_UID=$(curl -s -u admin:admin http://localhost:3000/api/search | jq -r '.[] | select(.title=="llm-d dashboard") | .uid')
 
 if [ -z "$DASHBOARD_UID" ] || [ "$DASHBOARD_UID" == "null" ]; then
