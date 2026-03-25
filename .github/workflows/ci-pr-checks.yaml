@@ -86,7 +86,7 @@ jobs:
           fetch-depth: 0
 
       - name: Check for code changes
-        uses: dorny/paths-filter@v3
+        uses: dorny/paths-filter@v4
         id: filter
         continue-on-error: true  # Don't fail if paths-filter can't determine changes (e.g., issue_comment without PR context)
         with:
