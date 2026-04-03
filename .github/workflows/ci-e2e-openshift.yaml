@@ -1046,6 +1046,8 @@ jobs:
           LLMD_NAMESPACE_B: ${{ env.LLMD_NAMESPACE_B }}
           GATEWAY_NAME: infra-inference-scheduling-inference-gateway-istio
           DEPLOYMENT: ms-inference-scheduling-llm-d-modelservice-decode
+          # Must match the scaler backend used during infrastructure deployment
+          SCALER_BACKEND: keda
           # Pass WVA_RELEASE_NAME so test can filter for current run's resources
           WVA_RELEASE_NAME: ${{ env.WVA_RELEASE_NAME }}
           # Controller instance label must match what the controller was deployed with
@@ -1057,6 +1059,7 @@ jobs:
           echo "Running consolidated E2E tests on OpenShift with configuration:"
           echo "  ENVIRONMENT: $ENVIRONMENT"
           echo "  USE_SIMULATOR: $USE_SIMULATOR"
+          echo "  SCALER_BACKEND: $SCALER_BACKEND"
           echo "  SCALE_TO_ZERO_ENABLED: $SCALE_TO_ZERO_ENABLED"
           echo "  WVA_NAMESPACE: $WVA_NAMESPACE"
           echo "  MONITORING_NAMESPACE: $MONITORING_NAMESPACE"
