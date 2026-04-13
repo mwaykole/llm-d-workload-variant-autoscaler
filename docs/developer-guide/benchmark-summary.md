@@ -1,4 +1,6 @@
-### Benchmark: scale-up-latency (Kind)
+### Benchmark Summary
+
+### scale-up-latency (Kind)
 
 | Metric | Value |
 |--------|-------|
