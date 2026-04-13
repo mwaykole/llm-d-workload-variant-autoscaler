@@ -338,6 +338,35 @@ deploy_llm_d_infrastructure() {
             else
                 log_warning "ConfigMap $LLM_D_EPP_NAME not found in $LLMD_NS"
             fi
+
+            # Ensure EPP has RBAC for InferenceModelRewrite (required by EPP v0.7.0+
+            # which watches this CRD, but older inferencepool Helm charts don't include it).
+            log_info "Ensuring EPP RBAC includes inferencemodelrewrites permission"
+            kubectl apply -f - <<RBAC_EOF
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: ${LLM_D_EPP_NAME}-model-rewrite
+  namespace: ${LLMD_NS}
+rules:
+- apiGroups: ["inference.networking.x-k8s.io"]
+  resources: ["inferencemodelrewrites"]
+  verbs: ["get", "list", "watch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: ${LLM_D_EPP_NAME}-model-rewrite
+  namespace: ${LLMD_NS}
+subjects:
+- kind: ServiceAccount
+  name: ${LLM_D_EPP_NAME}
+  namespace: ${LLMD_NS}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: ${LLM_D_EPP_NAME}-model-rewrite
+RBAC_EOF
         else
             log_warning "Skipping inference-scheduler patch: Deployment $LLM_D_EPP_NAME not found in $LLMD_NS"
         fi
