@@ -545,6 +545,9 @@ jobs:
           INSTALL_GATEWAY_CTRLPLANE: "false"
           E2E_TESTS_ENABLED: "true"
           NAMESPACE_SCOPED: "false"
+          # Use main branch of llm-d/llm-d for inferencepool chart v1.2.1 (GA API support);
+          # v0.3.0 default uses alpha API which Istio 1.29+ does not route through ext_proc.
+          LLM_D_RELEASE: main
           LLMD_NS: ${{ env.LLMD_NAMESPACE }}
           WVA_NS: ${{ env.WVA_NAMESPACE }}
           CONTROLLER_INSTANCE: ${{ env.WVA_NAMESPACE }}
