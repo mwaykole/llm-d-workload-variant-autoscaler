@@ -103,10 +103,10 @@ deploy_llm_d_infrastructure() {
             
             # Ensure each InferencePool maps ONLY to its exact model backend (Must use SAFE_POSTFIX because Kube labels cannot contain slashes)
             yq eval ".inferencePool.modelServers.matchLabels[\"llm-d.ai/model\"] = \"$SAFE_POSTFIX\"" -i "gaie-inference-scheduling/values.yaml"
-            
-            # The corresponding ModelService label will automatically be appended if we set it in the guide loop:
-            yq eval ".modelArtifacts.labels[\"llm-d.ai/model\"] = \"$SAFE_POSTFIX\"" -i "$LLM_D_MODELSERVICE_VALUES"
         fi
+
+        # The corresponding ModelService label will automatically be appended if we set it in the guide loop:
+        yq eval ".modelArtifacts.labels[\"llm-d.ai/model\"] = \"$SAFE_POSTFIX\"" -i "$LLM_D_MODELSERVICE_VALUES"
 
         ACTUAL_DEFAULT_MODEL=$(yq eval '.modelArtifacts.name' "$LLM_D_MODELSERVICE_VALUES" 2>/dev/null || echo "$DEFAULT_MODEL_ID")
         if [ -z "$ACTUAL_DEFAULT_MODEL" ] || [ "$ACTUAL_DEFAULT_MODEL" == "null" ]; then
