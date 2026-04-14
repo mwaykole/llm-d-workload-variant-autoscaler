@@ -91,7 +91,10 @@ print_summary() {
     echo "WVA Namespace:          $WVA_NS"
     echo "LLMD Namespace:         $LLMD_NS"
     echo "Monitoring Namespace:   $MONITORING_NAMESPACE"
-    echo "Model:                  $MODEL_ID"
+    # Handle dynamic printout whether legacy single model or modernized multi-model list
+    local DISPLAY_MODELS="${MODELS_LIST:-$MODEL_ID}"
+    
+    echo "Model(s):               $DISPLAY_MODELS"
     echo "Accelerator:            $ACCELERATOR_TYPE"
     echo "WVA Image:              $WVA_IMAGE_REPO:$WVA_IMAGE_TAG"
     echo "SLO (TPOT):             $SLO_TPOT ms"
@@ -128,8 +131,8 @@ print_summary() {
     echo "1. Check VariantAutoscaling status:"
     echo "   kubectl get variantautoscaling -n $LLMD_NS"
     echo ""
-    echo "2. View detailed status with conditions:"
-    echo "   kubectl describe variantautoscaling $LLM_D_MODELSERVICE_NAME-decode -n $LLMD_NS"
+    echo "2. View detailed status with conditions (for any listed model):"
+    echo "   kubectl describe variantautoscaling -n $LLMD_NS"
     echo ""
     echo "3. View WVA logs:"
     echo "   kubectl logs -n $WVA_NS -l app.kubernetes.io/name=workload-variant-autoscaler -f"
@@ -149,7 +152,7 @@ print_summary() {
         echo "• The llm-d inference simulator generates synthetic metrics for testing"
     else
         echo "• Model Loading:"
-        echo "  - Using $MODEL_ID"
+        echo "  - Using $DISPLAY_MODELS"
         echo "  - Model loading takes 2-3 minutes on $ACCELERATOR_TYPE GPUs"
         echo "  - Metrics will appear once model is fully loaded"
         echo "  - WVA will automatically detect metrics and start optimization"

@@ -69,6 +69,7 @@ INSTALL_GATEWAY_CTRLPLANE="${INSTALL_GATEWAY_CTRLPLANE:-false}"
 # Model and SLO Configuration
 DEFAULT_MODEL_ID=${DEFAULT_MODEL_ID:-"Qwen/Qwen3-0.6B"}
 MODEL_ID=${MODEL_ID:-"unsloth/Meta-Llama-3.1-8B"}
+MODELS_LIST=${MODELS_LIST:-""}
 ACCELERATOR_TYPE=${ACCELERATOR_TYPE:-"H100"}
 SLO_TPOT=${SLO_TPOT:-10}  # Target time-per-output-token SLO (in ms)
 SLO_TTFT=${SLO_TTFT:-1000}  # Target time-to-first-token SLO (in ms)

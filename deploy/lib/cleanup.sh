@@ -49,32 +49,39 @@ undeploy_llm_d_infrastructure() {
         RELEASE="$WELL_LIT_PATH_NAME"
     fi
 
+    log_info "Removing llm-d core components via helm..."
+
+    helm uninstall "infra-$RELEASE" -n "${LLMD_NS}" 2>/dev/null || true
+    
+    # Clean legacy single-model releases to ensure backwards compatibility cleanly
+    helm uninstall "gaie-$RELEASE" -n "${LLMD_NS}" 2>/dev/null || true
+    helm uninstall "ms-$RELEASE" -n "${LLMD_NS}" 2>/dev/null || true
+    
+    MODELS_LIST=${MODELS_LIST:-"$MODEL_ID"}
+    IFS=',' read -ra MODEL_ARRAY <<< "$MODELS_LIST"
+    
+    for loop_model in "${MODEL_ARRAY[@]}"; do
+        SAFE_POSTFIX=$(echo "$loop_model" | tr '[:upper:]' '[:lower:]' | tr '/' '-' | tr '.' '-' | tr '_' '-')
+        
+        # The helm release name matches gaie-$SAFE_POSTFIX directly via the gotmpl config
+        helm uninstall "gaie-${SAFE_POSTFIX}" -n "${LLMD_NS}" 2>/dev/null || true
+        helm uninstall "ms-${SAFE_POSTFIX}" -n "${LLMD_NS}" 2>/dev/null || true
+    done
+    
+    # Cleanup the monolithic route if it exists
+    kubectl delete httproute multi-model-unified-route -n "${LLMD_NS}" --ignore-not-found 2>/dev/null || true
+
     if [ ! -d "$EXAMPLE_DIR" ]; then
-        log_warning "llm-d example directory not found, skipping cleanup"
+        log_warning "llm-d example directory not found, skipping helmfile destroy for Gateway provider"
     else
         cd "$EXAMPLE_DIR"
-
-        log_info "Removing llm-d core components..."
-
-        helm uninstall "infra-$RELEASE" -n "${LLMD_NS}" 2>/dev/null || \
-            log_warning "llm-d infra components not found or already uninstalled"
-        helm uninstall "gaie-$RELEASE" -n "${LLMD_NS}" 2>/dev/null || \
-            log_warning "llm-d inference-scheduler components not found or already uninstalled"
-        helm uninstall "ms-$RELEASE" -n "${LLMD_NS}" 2>/dev/null || \
-            log_warning "llm-d ModelService components not found or already uninstalled"
-
-    fi
-
-    # Remove HF token secret
-    kubectl delete secret llm-d-hf-token -n "${LLMD_NS}" --ignore-not-found
-
-    # Remove Gateway provider if installed by the script
-    if [[ "$INSTALL_GATEWAY_CTRLPLANE" == true ]]; then
-        log_info "Removing Gateway provider..."
-        helmfile destroy -f "$GATEWAY_PREREQ_DIR/$GATEWAY_PROVIDER.helmfile.yaml" 2>/dev/null || \
-            log_warning "Gateway provider cleanup incomplete"
-        kubectl delete namespace "${GATEWAY_PROVIDER}-system" --ignore-not-found 2>/dev/null || true
-
+        # Remove Gateway provider if installed by the script
+        if [[ "$INSTALL_GATEWAY_CTRLPLANE" == true ]]; then
+            log_info "Removing Gateway provider..."
+            helmfile destroy -f "$GATEWAY_PREREQ_DIR/$GATEWAY_PROVIDER.helmfile.yaml" 2>/dev/null || \
+                log_warning "Gateway provider cleanup incomplete"
+            kubectl delete namespace "${GATEWAY_PROVIDER}-system" --ignore-not-found 2>/dev/null || true
+        fi
     fi
 
     log_info "Deleting llm-d cloned repository..."

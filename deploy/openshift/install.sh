@@ -123,13 +123,17 @@ deploy_wva_prerequisites() {
     log_info "Deploying Workload-Variant-Autoscaler..."
     extract_openshift_prometheus_ca
 
-    CHART_VERSION=0.8.0
-    log_info "Installing LeaderWorkerSet version $CHART_VERSION into lws-system namespace"
-    helm upgrade -i lws oci://registry.k8s.io/lws/charts/lws \
-        --version=$CHART_VERSION \
-        --namespace lws-system \
-        --create-namespace \
-        --wait --timeout 300s
+    if [ "$NAMESPACE_SCOPED" != "true" ]; then
+        CHART_VERSION=0.8.0
+        log_info "Installing LeaderWorkerSet version $CHART_VERSION into lws-system namespace"
+        helm upgrade -i lws oci://registry.k8s.io/lws/charts/lws \
+            --version=$CHART_VERSION \
+            --namespace lws-system \
+            --create-namespace \
+            --wait --timeout 300s
+    else
+        log_info "Skipping LeaderWorkerSet installation because NAMESPACE_SCOPED=true"
+    fi
 
     log_success "WVA prerequisites deployed"
 }

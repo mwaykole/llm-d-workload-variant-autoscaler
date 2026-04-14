@@ -71,145 +71,213 @@ deploy_llm_d_infrastructure() {
     cd "$EXAMPLE_DIR"
     log_info "Configuring llm-d infrastructure"
 
-    # Detect the actual default model from the values file (not the hardcoded DEFAULT_MODEL_ID)
-    ACTUAL_DEFAULT_MODEL=$(yq eval '.modelArtifacts.name' "$LLM_D_MODELSERVICE_VALUES" 2>/dev/null || echo "$DEFAULT_MODEL_ID")
-    if [ -z "$ACTUAL_DEFAULT_MODEL" ] || [ "$ACTUAL_DEFAULT_MODEL" == "null" ]; then
-        ACTUAL_DEFAULT_MODEL="$DEFAULT_MODEL_ID"
+    IFS=',' read -ra MODEL_ARRAY <<< "${MODELS_LIST:-$MODEL_ID}"
+    
+    # Deploy base infra ONCE
+    log_info "Deploying base Gateway Infrastructure (once)..."
+    helmfile apply -e "$GATEWAY_PROVIDER" -n "${LLMD_NS}" --selector "type=infrastructure"
+
+    # Backup the original values files
+    cp "$LLM_D_MODELSERVICE_VALUES" "${LLM_D_MODELSERVICE_VALUES}.bak"
+    if [ -f "gaie-inference-scheduling/values.yaml" ]; then
+        cp "gaie-inference-scheduling/values.yaml" "gaie-inference-scheduling/values.yaml.bak"
     fi
 
-    # Update model ID if different from the guide's actual default
-    if [ "$MODEL_ID" != "$ACTUAL_DEFAULT_MODEL" ] ; then
-        log_info "Updating deployment to use model: $MODEL_ID (replacing guide default: $ACTUAL_DEFAULT_MODEL)"
-        yq eval "(.. | select(. == \"$ACTUAL_DEFAULT_MODEL\")) = \"$MODEL_ID\" | (.. | select(. == \"hf://$ACTUAL_DEFAULT_MODEL\")) = \"hf://$MODEL_ID\"" -i "$LLM_D_MODELSERVICE_VALUES"
+    for loop_model in "${MODEL_ARRAY[@]}"; do
+        SAFE_POSTFIX=$(echo "$loop_model" | tr '[:upper:]' '[:lower:]' | tr '/' '-' | tr '.' '-' | tr '_' '-')
+        export RELEASE_NAME_POSTFIX="$SAFE_POSTFIX"
+        export LLM_D_MODELSERVICE_NAME="ms-${SAFE_POSTFIX}"
+        export LLM_D_EPP_NAME="gaie-${SAFE_POSTFIX}-epp"
+        export MODEL_ID="$loop_model"
 
-        # Increase model-storage volume size
-        log_info "Increasing model-storage volume size for model: $MODEL_ID"
-        yq eval '.modelArtifacts.size = "100Gi"' -i "$LLM_D_MODELSERVICE_VALUES"
-    else
-        log_info "Model ID matches guide default ($ACTUAL_DEFAULT_MODEL), no replacement needed"
-    fi
-
-    # Configure llm-d-inference-simulator if needed
-    if [ "$DEPLOY_LLM_D_INFERENCE_SIM" == "true" ]; then
-      log_info "Deploying llm-d-inference-simulator..."
-        yq eval ".decode.containers[0].image = \"$LLM_D_INFERENCE_SIM_IMG_REPO:$LLM_D_INFERENCE_SIM_IMG_TAG\" | \
-                 .prefill.containers[0].image = \"$LLM_D_INFERENCE_SIM_IMG_REPO:$LLM_D_INFERENCE_SIM_IMG_TAG\" | \
-                 .decode.containers[0].args = [\"--time-to-first-token=$TTFT_AVERAGE_LATENCY_MS\", \"--inter-token-latency=$ITL_AVERAGE_LATENCY_MS\"] | \
-                 .prefill.containers[0].args = [\"--time-to-first-token=$TTFT_AVERAGE_LATENCY_MS\", \"--inter-token-latency=$ITL_AVERAGE_LATENCY_MS\"]" \
-                 -i "$LLM_D_MODELSERVICE_VALUES"
-    else
-        log_info "Skipping llm-d-inference-simulator deployment (DEPLOY_LLM_D_INFERENCE_SIM=false)"
-    fi
-
-    # Override llm-d container image tags if set (e.g. upgrade from v0.3.0 to v0.6.0)
-    if [ -n "$LLMD_IMAGE_TAG" ]; then
-      log_info "Overriding llm-d image tags to $LLMD_IMAGE_TAG"
-      yq eval ".decode.containers[0].image = \"ghcr.io/llm-d/llm-d-cuda:${LLMD_IMAGE_TAG}\"" -i "$LLM_D_MODELSERVICE_VALUES"
-      yq eval ".routing.proxy.image = \"ghcr.io/llm-d/llm-d-routing-sidecar:${LLMD_IMAGE_TAG}\"" -i "$LLM_D_MODELSERVICE_VALUES"
-    fi
-
-    # Configure vLLM max-num-seqs if set (useful for e2e testing to force saturation)
-    if [ -n "$VLLM_MAX_NUM_SEQS" ]; then
-      log_info "Setting vLLM max-num-seqs to $VLLM_MAX_NUM_SEQS for decode containers"
-      yq eval ".decode.containers[0].args += [\"--max-num-seqs=$VLLM_MAX_NUM_SEQS\"]" -i "$LLM_D_MODELSERVICE_VALUES"
-    fi
-
-    # Configure vLLM GPU memory utilization if set
-    if [ -n "$VLLM_GPU_MEM_UTIL" ]; then
-      log_info "Setting vLLM gpu-memory-utilization to $VLLM_GPU_MEM_UTIL"
-      yq eval ".decode.containers[0].args += [\"--gpu-memory-utilization=$VLLM_GPU_MEM_UTIL\"]" -i "$LLM_D_MODELSERVICE_VALUES"
-    fi
-
-    # Configure vLLM max-model-len if set
-    if [ -n "$VLLM_MAX_MODEL_LEN" ]; then
-      log_info "Setting vLLM max-model-len to $VLLM_MAX_MODEL_LEN"
-      yq eval ".decode.containers[0].args += [\"--max-model-len=$VLLM_MAX_MODEL_LEN\"]" -i "$LLM_D_MODELSERVICE_VALUES"
-    fi
-
-    # Configure vLLM block-size if set
-    if [ -n "$VLLM_BLOCK_SIZE" ]; then
-      log_info "Setting vLLM block-size to $VLLM_BLOCK_SIZE"
-      yq eval ".decode.containers[0].args += [\"--block-size=$VLLM_BLOCK_SIZE\"]" -i "$LLM_D_MODELSERVICE_VALUES"
-    fi
-
-    # Configure vLLM enforce-eager if set
-    if [ -n "$VLLM_ENFORCE_EAGER" ] && [ "$VLLM_ENFORCE_EAGER" = "true" ]; then
-      log_info "Setting vLLM enforce-eager"
-      yq eval ".decode.containers[0].args += [\"--enforce-eager\"]" -i "$LLM_D_MODELSERVICE_VALUES"
-    fi
-
-    # Configure decode replicas if set (useful for e2e testing with limited GPUs)
-    if [ -n "$DECODE_REPLICAS" ]; then
-      log_info "Setting decode replicas to $DECODE_REPLICAS"
-      yq eval ".decode.replicas = $DECODE_REPLICAS" -i "$LLM_D_MODELSERVICE_VALUES"
-    fi
-
-    # Check if the guide's llm-d.ai/model label differs from what WVA's vllm-service expects.
-    # If so, we'll patch pod labels post-deploy (not pre-deploy) to avoid violating the
-    # llm-d-modelservice chart schema which disallows extra properties under modelArtifacts.
-    CURRENT_MODEL_LABEL=$(yq eval '.modelArtifacts.labels."llm-d.ai/model"' "$LLM_D_MODELSERVICE_VALUES" 2>/dev/null || echo "")
-    NEEDS_LABEL_ALIGNMENT=false
-    if [ -n "$CURRENT_MODEL_LABEL" ] && [ "$CURRENT_MODEL_LABEL" != "null" ] && [ "$CURRENT_MODEL_LABEL" != "$LLM_D_MODELSERVICE_NAME" ]; then
-      log_info "Will align llm-d.ai/model label post-deploy: '$CURRENT_MODEL_LABEL' -> '$LLM_D_MODELSERVICE_NAME'"
-      NEEDS_LABEL_ALIGNMENT=true
-    fi
-
-    # Auto-detect vLLM port from guide configuration and update WVA vllm-service.
-    # When routing proxy is disabled, vLLM serves directly on containerPort (typically 8000).
-    # When proxy is enabled, vLLM serves on proxy.targetPort (typically 8200).
-    PROXY_ENABLED=$(yq eval '.routing.proxy.enabled // true' "$LLM_D_MODELSERVICE_VALUES" 2>/dev/null || echo "true")
-    if [ "$PROXY_ENABLED" == "false" ]; then
-      DETECTED_PORT=$(yq eval '.decode.containers[0].ports[0].containerPort // 8000' "$LLM_D_MODELSERVICE_VALUES" 2>/dev/null || echo "8000")
-      if [ "$VLLM_SVC_PORT" != "$DETECTED_PORT" ]; then
-        log_info "Routing proxy disabled - updating vLLM service port: $VLLM_SVC_PORT -> $DETECTED_PORT"
-        VLLM_SVC_PORT=$DETECTED_PORT
-        # Update the WVA vllm-service port (WVA was deployed before llm-d infra)
-        if [ "$DEPLOY_WVA" == "true" ] && [ "$VLLM_SVC_ENABLED" == "true" ]; then
-          helm upgrade "$WVA_RELEASE_NAME" ${WVA_PROJECT}/charts/workload-variant-autoscaler \
-            -n "$WVA_NS" --reuse-values \
-            --set wva.namespaceScoped="${NAMESPACE_SCOPED:-true}" \
-            --set vllmService.port="$VLLM_SVC_PORT" \
-            --set vllmService.targetPort="$VLLM_SVC_PORT"
+        log_info "--------------------------------------------------------"
+        log_info "Configuring llm-d infrastructure for model: $MODEL_ID (postfix: $SAFE_POSTFIX)"
+        
+        # Reset values files for this iteration
+        cp "${LLM_D_MODELSERVICE_VALUES}.bak" "$LLM_D_MODELSERVICE_VALUES"
+        if [ -f "gaie-inference-scheduling/values.yaml.bak" ]; then
+            cp "gaie-inference-scheduling/values.yaml.bak" "gaie-inference-scheduling/values.yaml"
+            
+            # Prevent secret collision when deploying multiple gaie instances
+            yq eval ".inferenceExtension.monitoring.prometheus.auth.secretName = \"metrics-reader-secret-${SAFE_POSTFIX}\"" -i "gaie-inference-scheduling/values.yaml"
+            
+            # Ensure each InferencePool maps ONLY to its exact model backend (Must use SAFE_POSTFIX because Kube labels cannot contain slashes)
+            yq eval ".inferencePool.modelServers.matchLabels[\"llm-d.ai/model\"] = \"$SAFE_POSTFIX\"" -i "gaie-inference-scheduling/values.yaml"
+            
+            # The corresponding ModelService label will automatically be appended if we set it in the guide loop:
+            yq eval ".modelArtifacts.labels[\"llm-d.ai/model\"] = \"$SAFE_POSTFIX\"" -i "$LLM_D_MODELSERVICE_VALUES"
         fi
-      fi
-    fi
 
-    # Deploy llm-d core components
-    log_info "Deploying llm-d core components"
-    # When DEPLOY_WVA is true, skip WVA in helmfile — install.sh deploys it
-    # separately using the local chart (supports dev/test of chart changes).
-    # The helmfile's WVA release uses the published OCI chart which may not
-    # have the latest fixes and uses KIND-specific defaults (e.g. monitoringNamespace).
-    local -a helmfile_selector_exprs=()
-    if [ "$DEPLOY_WVA" == "true" ]; then
-      helmfile_selector_exprs+=("kind!=autoscaling")
-      log_info "Skipping WVA in helmfile (will be deployed separately from local chart)"
-    fi
-    if [ "$E2E_TESTS_ENABLED" = "true" ] && [ "$INFRA_ONLY" = "true" ]; then
-      # E2E infra-only tests create scenario-specific modelservice workloads
-      # themselves. Skip the default llm-d-modelservice release so baseline
-      # infrastructure is clean and we avoid create-then-delete churn.
-      helmfile_selector_exprs+=("chart!=llm-d-modelservice")
-      log_info "E2E infra-only mode: skipping llm-d-modelservice release in helmfile"
-    fi
-    local selector_csv=""
-    if [ "${#helmfile_selector_exprs[@]}" -gt 0 ]; then
-      selector_csv=$(IFS=,; echo "${helmfile_selector_exprs[*]}")
-      log_info "helmfile selector: $selector_csv"
-      helmfile apply -e "$GATEWAY_PROVIDER" -n "${LLMD_NS}" --selector "$selector_csv"
-    else
-      log_info "helmfile selector: (none)"
-      helmfile apply -e "$GATEWAY_PROVIDER" -n "${LLMD_NS}"
-    fi
+        ACTUAL_DEFAULT_MODEL=$(yq eval '.modelArtifacts.name' "$LLM_D_MODELSERVICE_VALUES" 2>/dev/null || echo "$DEFAULT_MODEL_ID")
+        if [ -z "$ACTUAL_DEFAULT_MODEL" ] || [ "$ACTUAL_DEFAULT_MODEL" == "null" ]; then
+            ACTUAL_DEFAULT_MODEL="$DEFAULT_MODEL_ID"
+        fi
 
-    # Post-deploy workaround: Upstream EPP chart (v1.0.1) is missing RBAC for inferencemodelrewrites
-    log_info "Patching Role $LLM_D_EPP_NAME to include inferencemodelrewrites"
-    if kubectl get role "$LLM_D_EPP_NAME" -n "$LLMD_NS" &> /dev/null; then
-        kubectl patch role "$LLM_D_EPP_NAME" -n "$LLMD_NS" --type='json' -p='[{"op": "add", "path": "/rules/0/resources/-", "value": "inferencemodelrewrites"}]' && \
-            log_success "Patched Role $LLM_D_EPP_NAME successfully" || \
-            log_warning "Failed to patch Role $LLM_D_EPP_NAME"
-    else
-        log_warning "Role $LLM_D_EPP_NAME not found, skipping RBAC patch"
+        if [ "$MODEL_ID" != "$ACTUAL_DEFAULT_MODEL" ] ; then
+            log_info "Updating deployment to use model: $MODEL_ID (replacing guide default: $ACTUAL_DEFAULT_MODEL)"
+            yq eval "(.. | select(. == \"$ACTUAL_DEFAULT_MODEL\")) = \"$MODEL_ID\" | (.. | select(. == \"hf://$ACTUAL_DEFAULT_MODEL\")) = \"hf://$MODEL_ID\"" -i "$LLM_D_MODELSERVICE_VALUES"
+            yq eval '.modelArtifacts.size = "100Gi"' -i "$LLM_D_MODELSERVICE_VALUES"
+        else
+            log_info "Model ID matches guide default ($ACTUAL_DEFAULT_MODEL), no replacement needed"
+        fi
+
+        if [ "$DEPLOY_LLM_D_INFERENCE_SIM" == "true" ]; then
+          log_info "Deploying llm-d-inference-simulator..."
+            yq eval ".decode.containers[0].image = \"$LLM_D_INFERENCE_SIM_IMG_REPO:$LLM_D_INFERENCE_SIM_IMG_TAG\" | \
+                     .prefill.containers[0].image = \"$LLM_D_INFERENCE_SIM_IMG_REPO:$LLM_D_INFERENCE_SIM_IMG_TAG\" | \
+                     .decode.containers[0].args = [\"--time-to-first-token=$TTFT_AVERAGE_LATENCY_MS\", \"--inter-token-latency=$ITL_AVERAGE_LATENCY_MS\"] | \
+                     .prefill.containers[0].args = [\"--time-to-first-token=$TTFT_AVERAGE_LATENCY_MS\", \"--inter-token-latency=$ITL_AVERAGE_LATENCY_MS\"]" \
+                     -i "$LLM_D_MODELSERVICE_VALUES"
+        fi
+
+        if [ -n "$LLMD_IMAGE_TAG" ]; then
+          log_info "Overriding llm-d image tags to $LLMD_IMAGE_TAG"
+          yq eval ".decode.containers[0].image = \"ghcr.io/llm-d/llm-d-cuda:${LLMD_IMAGE_TAG}\"" -i "$LLM_D_MODELSERVICE_VALUES"
+          yq eval ".routing.proxy.image = \"ghcr.io/llm-d/llm-d-routing-sidecar:${LLMD_IMAGE_TAG}\"" -i "$LLM_D_MODELSERVICE_VALUES"
+        fi
+
+        if [ -n "$VLLM_MAX_NUM_SEQS" ]; then
+          log_info "Setting vLLM max-num-seqs to $VLLM_MAX_NUM_SEQS for decode containers"
+          yq eval ".decode.containers[0].args += [\"--max-num-seqs=$VLLM_MAX_NUM_SEQS\"]" -i "$LLM_D_MODELSERVICE_VALUES"
+        fi
+
+        if [ -n "$VLLM_GPU_MEM_UTIL" ]; then
+          log_info "Setting vLLM gpu-memory-utilization to $VLLM_GPU_MEM_UTIL"
+          yq eval ".decode.containers[0].args += [\"--gpu-memory-utilization=$VLLM_GPU_MEM_UTIL\"]" -i "$LLM_D_MODELSERVICE_VALUES"
+        fi
+
+        if [ -n "$VLLM_MAX_MODEL_LEN" ]; then
+          log_info "Setting vLLM max-model-len to $VLLM_MAX_MODEL_LEN"
+          yq eval ".decode.containers[0].args += [\"--max-model-len=$VLLM_MAX_MODEL_LEN\"]" -i "$LLM_D_MODELSERVICE_VALUES"
+        fi
+
+        if [ -n "$VLLM_BLOCK_SIZE" ]; then
+          log_info "Setting vLLM block-size to $VLLM_BLOCK_SIZE"
+          yq eval ".decode.containers[0].args += [\"--block-size=$VLLM_BLOCK_SIZE\"]" -i "$LLM_D_MODELSERVICE_VALUES"
+        fi
+
+        if [ -n "$VLLM_ENFORCE_EAGER" ] && [ "$VLLM_ENFORCE_EAGER" = "true" ]; then
+          log_info "Setting vLLM enforce-eager"
+          yq eval ".decode.containers[0].args += [\"--enforce-eager\"]" -i "$LLM_D_MODELSERVICE_VALUES"
+        fi
+
+        if [ -n "$DECODE_REPLICAS" ]; then
+          log_info "Setting decode replicas to $DECODE_REPLICAS"
+          yq eval ".decode.replicas = $DECODE_REPLICAS" -i "$LLM_D_MODELSERVICE_VALUES"
+        fi
+
+        # Multi-model hardcodes for isolated stacks to ensure hardware fits
+        if [ "${#MODEL_ARRAY[@]}" -gt 1 ]; then
+          log_info "Multi-model target detected: Forcing decode.replicas=1 and prefill.replicas=0"
+          yq eval ".decode.replicas = 1 | .prefill.replicas = 0" -i "$LLM_D_MODELSERVICE_VALUES"
+        fi
+
+        CURRENT_MODEL_LABEL=$(yq eval '.modelArtifacts.labels."llm-d.ai/model"' "$LLM_D_MODELSERVICE_VALUES" 2>/dev/null || echo "")
+        NEEDS_LABEL_ALIGNMENT=false
+        if [ -n "$CURRENT_MODEL_LABEL" ] && [ "$CURRENT_MODEL_LABEL" != "null" ] && [ "$CURRENT_MODEL_LABEL" != "$LLM_D_MODELSERVICE_NAME" ]; then
+          log_info "Will align llm-d.ai/model label post-deploy: '$CURRENT_MODEL_LABEL' -> '$LLM_D_MODELSERVICE_NAME'"
+          NEEDS_LABEL_ALIGNMENT=true
+        fi
+
+        PROXY_ENABLED=$(yq eval '.routing.proxy.enabled // true' "$LLM_D_MODELSERVICE_VALUES" 2>/dev/null || echo "true")
+        if [ "$PROXY_ENABLED" == "false" ]; then
+          DETECTED_PORT=$(yq eval '.decode.containers[0].ports[0].containerPort // 8000' "$LLM_D_MODELSERVICE_VALUES" 2>/dev/null || echo "8000")
+          if [ "$VLLM_SVC_PORT" != "$DETECTED_PORT" ]; then
+            log_info "Routing proxy disabled - updating vLLM service port: $VLLM_SVC_PORT -> $DETECTED_PORT"
+            VLLM_SVC_PORT=$DETECTED_PORT
+            if [ "$DEPLOY_WVA" == "true" ] && [ "$VLLM_SVC_ENABLED" == "true" ]; then
+              helm upgrade "$WVA_RELEASE_NAME" ${WVA_PROJECT}/charts/workload-variant-autoscaler \
+                -n "$WVA_NS" --reuse-values \
+                --set wva.namespaceScoped="${NAMESPACE_SCOPED:-true}" \
+                --set vllmService.port="$VLLM_SVC_PORT" \
+                --set vllmService.targetPort="$VLLM_SVC_PORT"
+            fi
+          fi
+        fi
+
+        log_info "Deploying gaie & ms for model: $MODEL_ID"
+        local -a helmfile_selector_exprs=()
+        if [ "$DEPLOY_WVA" == "true" ]; then
+          helmfile_selector_exprs+=("kind!=autoscaling")
+        fi
+        # Exclude base infra (already installed)
+        helmfile_selector_exprs+=("type!=infrastructure")
+        
+        # Note: Even if E2E_TESTS_ENABLED=true and INFRA_ONLY=true, if we are doing multi-model, we *must* install them.
+        # So we skip the modelservice only if there's exactly 1 model AND it's an infra-only run designed for dynamic models.
+        if [ "$E2E_TESTS_ENABLED" = "true" ] && [ "$INFRA_ONLY" = "true" ] && [ "${#MODEL_ARRAY[@]}" -eq 1 ]; then
+          helmfile_selector_exprs+=("chart!=llm-d-modelservice")
+          log_info "E2E infra-only mode: skipping llm-d-modelservice release in helmfile"
+        fi
+
+        local selector_csv=""
+        if [ "${#helmfile_selector_exprs[@]}" -gt 0 ]; then
+          selector_csv=$(IFS=,; echo "${helmfile_selector_exprs[*]}")
+          log_info "helmfile selector: $selector_csv"
+          helmfile apply -e "$GATEWAY_PROVIDER" -n "${LLMD_NS}" --selector "$selector_csv"
+        else
+          log_info "helmfile selector: (none)"
+          helmfile apply -e "$GATEWAY_PROVIDER" -n "${LLMD_NS}"
+        fi
+
+        log_info "Patching Role $LLM_D_EPP_NAME to include inferencemodelrewrites"
+        if kubectl get role "${LLM_D_EPP_NAME}-sa" -n "$LLMD_NS" &> /dev/null; then
+            kubectl patch role "${LLM_D_EPP_NAME}-sa" -n "$LLMD_NS" --type='json' -p='[{"op": "add", "path": "/rules/0/resources/-", "value": "inferencemodelrewrites"}]' && \
+                log_success "Patched Role ${LLM_D_EPP_NAME}-sa successfully" || \
+                log_warning "Failed to patch Role ${LLM_D_EPP_NAME}-sa"
+        elif kubectl get role "$LLM_D_EPP_NAME" -n "$LLMD_NS" &> /dev/null; then
+            kubectl patch role "$LLM_D_EPP_NAME" -n "$LLMD_NS" --type='json' -p='[{"op": "add", "path": "/rules/0/resources/-", "value": "inferencemodelrewrites"}]' && \
+                log_success "Patched Role $LLM_D_EPP_NAME successfully" || \
+                log_warning "Failed to patch Role $LLM_D_EPP_NAME"
+        else
+            log_warning "Role $LLM_D_EPP_NAME (and -sa) not found, skipping RBAC patch"
+        fi
+
+    done
+
+    # Generate and apply unified HTTPRoute CR for Multi-Model routing
+    if [ "${#MODEL_ARRAY[@]}" -gt 1 ]; then
+        log_info "Generating composite URLRewrite HTTPRoute for concurrent routing..."
+        local route_yaml="apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: multi-model-unified-route
+  namespace: ${LLMD_NS}
+spec:
+  parentRefs:
+  - group: gateway.networking.k8s.io
+    kind: Gateway
+    name: infra-${WELL_LIT_PATH_NAME}-inference-gateway
+  rules:"
+        
+        for loop_model in "${MODEL_ARRAY[@]}"; do
+            SAFE_POSTFIX=$(echo "$loop_model" | tr '[:upper:]' '[:lower:]' | tr '/' '-' | tr '.' '-' | tr '_' '-')
+            local path_prefix="/${SAFE_POSTFIX}"
+            
+            # Append rule to yaml block
+            route_yaml="${route_yaml}
+    - matches:
+      - path:
+          type: PathPrefix
+          value: ${path_prefix}
+      filters:
+      - type: URLRewrite
+        urlRewrite:
+          path:
+            type: ReplacePrefixMatch
+            replacePrefixMatch: /
+      backendRefs:
+      - group: inference.networking.k8s.io
+        kind: InferencePool
+        name: gaie-${SAFE_POSTFIX}
+        port: 8000
+      timeouts:
+        request: 300s"
+        done
+
+        echo "$route_yaml" > multi-model-unified-route.yaml
+        kubectl apply -f multi-model-unified-route.yaml
+        log_success "Applied monolithic multi-model HTTPRoute!"
     fi
 
     if [ "$E2E_TESTS_ENABLED" = "true" ] && [ "$INFRA_ONLY" = "true" ]; then
@@ -263,7 +331,7 @@ deploy_llm_d_infrastructure() {
     if [ -f httproute.yaml ]; then
         local rn="${RELEASE_NAME_POSTFIX:-}"
         if [ -n "$rn" ]; then
-            local gw_name="infra-${rn}-inference-gateway"
+            local gw_name="infra-${WELL_LIT_PATH_NAME}-inference-gateway"
             local pool_name="gaie-${rn}"
             log_info "Applying HTTPRoute (gateway=$gw_name, pool=$pool_name)"
             if ! yq eval "
@@ -397,8 +465,48 @@ deploy_llm_d_infrastructure() {
             log_warning "llm-d components are not ready yet - check 'kubectl get pods -n $LLMD_NS'"
     fi
 
+    # Automate traffic validation if multi-model concurrent load balancer routing was used
+    if [ "${#MODEL_ARRAY[@]}" -gt 1 ]; then
+        log_info "Automated Multi-Model Validation: Launching Gateway end-to-end trace..."
+        local GATEWAY_SVC="infra-${WELL_LIT_PATH_NAME}-inference-gateway-istio"
+        local SVC_IP=$(kubectl get svc "$GATEWAY_SVC" -n "$LLMD_NS" -o jsonpath='{.spec.clusterIP}' 2>/dev/null || echo "")
+        
+        if [ -n "$SVC_IP" ]; then
+            log_info "Spawning ephemeral curl client inside cluster to probe '$GATEWAY_SVC' at $SVC_IP..."
+            kubectl run wva-e2e-ping --image=curlimages/curl --restart=Never -n "$LLMD_NS" -- sleep 100 >/dev/null 2>&1 || true
+            kubectl wait --for=condition=Ready pod/wva-e2e-ping -n "$LLMD_NS" --timeout=60s >/dev/null 2>&1 || true
+            
+            for loop_model in "${MODEL_ARRAY[@]}"; do
+                SAFE_POSTFIX=$(echo "$loop_model" | tr '[:upper:]' '[:lower:]' | tr '/' '-' | tr '.' '-' | tr '_' '-')
+                log_info "Probing Multi-Model Route: /${SAFE_POSTFIX}/v1/models"
+                
+                local max_retries=12
+                local attempt=1
+                local HTTP_CODE="000"
+                while [ $attempt -le $max_retries ]; do
+                    # Send silent curl, output merely the HTTP response code integer
+                    HTTP_CODE=$(kubectl exec wva-e2e-ping -n "$LLMD_NS" -- curl -o /dev/null -s -w "%{http_code}" "http://${SVC_IP}/${SAFE_POSTFIX}/v1/models" 2>/dev/null || echo "000")
+                    if [ "$HTTP_CODE" == "200" ]; then
+                        log_success "Multi-Model Route [${loop_model}] successfully acknowledged traffic via Gateway proxy."
+                        break
+                    else
+                        log_info "  Attempt $attempt: Route /${SAFE_POSTFIX}/v1/models returned HTTP $HTTP_CODE, waiting for cold-start..."
+                        sleep 10
+                    fi
+                    ((attempt++))
+                done
+                if [ "$HTTP_CODE" != "200" ]; then
+                    log_warning "Automated validation exhausted for [${loop_model}], expected HTTP 200 via route /${SAFE_POSTFIX} but ultimately received ${HTTP_CODE}."
+                fi
+            done
+            
+            kubectl delete pod wva-e2e-ping -n "$LLMD_NS" --force --grace-period=0 >/dev/null 2>&1 || true
+        else
+            log_warning "Could not locate Gateway Service IP '$GATEWAY_SVC' to execute automated route validation."
+        fi
+    fi
+
     # Align WVA with the InferencePool API group in use (scale-from-zero requires WVA to watch the same group).
-    # llm-d version determines whether pools are inference.networking.k8s.io (v1) or inference.networking.x-k8s.io (v1alpha2).
     if [ "$DEPLOY_WVA" == "true" ]; then
         detect_inference_pool_api_group
         if [ -n "$DETECTED_POOL_GROUP" ]; then

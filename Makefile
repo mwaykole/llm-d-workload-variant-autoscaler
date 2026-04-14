@@ -136,6 +136,7 @@ deploy-wva-on-openshift: manifests kustomize ## Deploy WVA to OpenShift cluster 
 undeploy-wva-on-openshift:
 	@echo ">>> Undeploying workload-variant-autoscaler from OpenShift"
 	export KIND=$(KIND) KUBECTL=$(KUBECTL) ENVIRONMENT=openshift && \
+		MODELS_LIST=$(if $(MODELS),$(MODELS),"") \
 		DEPLOY_LLM_D=$(DEPLOY_LLM_D) deploy/install.sh --undeploy
 
 ## Deploy WVA on Kubernetes with the specified image.
@@ -150,6 +151,7 @@ deploy-wva-on-k8s: manifests kustomize ## Deploy WVA on Kubernetes with the spec
 undeploy-wva-on-k8s:
 	@echo ">>> Undeploying workload-variant-autoscaler from Kubernetes"
 	export KIND=$(KIND) KUBECTL=$(KUBECTL) ENVIRONMENT=kubernetes && \
+		MODELS_LIST=$(if $(MODELS),$(MODELS),"") \
 		ENVIRONMENT=kubernetes DEPLOY_LLM_D=$(DEPLOY_LLM_D)  deploy/install.sh --undeploy
 
 # E2E tests on Kind cluster for saturation-based autoscaling
@@ -168,7 +170,7 @@ undeploy-wva-on-k8s:
 # Deploys only the infrastructure (WVA controller + llm-d) without VA/HPA resources.
 # If IMG is set, builds the image locally first (unless SKIP_BUILD=true).
 .PHONY: deploy-e2e-infra
-deploy-e2e-infra: ## Deploy e2e test infrastructure (infra-only: WVA + llm-d, no VA/HPA). Uses Prometheus Adapter unless SCALER_BACKEND=keda.
+deploy-e2e-infra: ## Deploy e2e test infrastructure (infra-only: WVA + llm-d, no VA/HPA). Uses Prometheus Adapter unless SCALER_BACKEND=keda. Supports multiple models via MODELS variable.
 	@echo "Deploying e2e test infrastructure (infra-only mode)..."
 	@if [ -n "$(IMG)" ]; then \
 		echo "IMG is set to '$(IMG)'"; \
@@ -193,9 +195,12 @@ deploy-e2e-infra: ## Deploy e2e test infrastructure (infra-only: WVA + llm-d, no
 		SCALE_TO_ZERO_ENABLED=$(SCALE_TO_ZERO_ENABLED) \
 		SCALER_BACKEND=$(SCALER_BACKEND) \
 		INSTALL_GATEWAY_CTRLPLANE=true \
-		NAMESPACE_SCOPED=false \
+		NAMESPACE_SCOPED=$(if $(NAMESPACE_SCOPED),$(NAMESPACE_SCOPED),false) \
+		WVA_NS=$(if $(WVA_NS),$(WVA_NS),"workload-variant-autoscaler-system") \
+		LLMD_NS=$(if $(LLMD_NS),$(LLMD_NS),"llm-d-inference-scheduler") \
 		DECODE_REPLICAS=$(DECODE_REPLICAS) \
 		LLM_D_RELEASE=$(LLM_D_RELEASE) \
+		MODELS_LIST=$(if $(MODELS),$(MODELS),"") \
 		WVA_IMAGE_REPO=$$IMAGE_REPO \
 		WVA_IMAGE_TAG=$$IMAGE_TAG \
 		WVA_IMAGE_PULL_POLICY=IfNotPresent \
@@ -208,11 +213,15 @@ deploy-e2e-infra: ## Deploy e2e test infrastructure (infra-only: WVA + llm-d, no
 		SCALE_TO_ZERO_ENABLED=$(SCALE_TO_ZERO_ENABLED) \
 		SCALER_BACKEND=$(SCALER_BACKEND) \
 		INSTALL_GATEWAY_CTRLPLANE=true \
-		NAMESPACE_SCOPED=false \
+		NAMESPACE_SCOPED=$(if $(NAMESPACE_SCOPED),$(NAMESPACE_SCOPED),false) \
+		WVA_NS=$(if $(WVA_NS),$(WVA_NS),"workload-variant-autoscaler-system") \
+		LLMD_NS=$(if $(LLMD_NS),$(LLMD_NS),"llm-d-inference-scheduler") \
 		DECODE_REPLICAS=$(DECODE_REPLICAS) \
 		LLM_D_RELEASE=$(LLM_D_RELEASE) \
+		MODELS_LIST=$(if $(MODELS),$(MODELS),"") \
 		./deploy/install.sh; \
 	fi
+
 
 # Deploy e2e infrastructure with KEDA as scaler backend (installs KEDA, skips Prometheus Adapter).
 # Runs a subset of smoke tests from the e2e suite.
@@ -275,8 +284,8 @@ test-e2e-full-with-setup: deploy-e2e-infra test-e2e-full
 
 # Benchmark targets
 .PHONY: test-benchmark
-test-benchmark: manifests generate fmt vet ## Run benchmark tests (scale-up-latency scenario)
-	@echo "Running benchmark tests..."
+test-benchmark: manifests generate fmt vet ## Run benchmark tests (prefill-heavy scaling scenario)
+	@echo "Running multi-model prefill-heavy benchmark tests..."
 	KUBECONFIG=$(KUBECONFIG) \
 	ENVIRONMENT=$(ENVIRONMENT) \
 	WVA_NAMESPACE=$(CONTROLLER_NAMESPACE) \
@@ -286,6 +295,7 @@ test-benchmark: manifests generate fmt vet ## Run benchmark tests (scale-up-late
 	SCALER_BACKEND=$(SCALER_BACKEND) \
 	MODEL_ID=$(MODEL_ID) \
 	PROMETHEUS_TOKEN=$$(oc whoami -t 2>/dev/null || echo "") \
+	MODELS_LIST="$(MODELS_LIST)" \
 	go test ./test/benchmark/ -timeout 75m -v -ginkgo.v \
 		-ginkgo.label-filter="phase3a"; \
 	TEST_EXIT_CODE=$$?; \

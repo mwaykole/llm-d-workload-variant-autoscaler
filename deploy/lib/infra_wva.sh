@@ -193,14 +193,18 @@ deploy_wva_prerequisites_kube_like() {
         VALUES_FILE="${WVA_PROJECT}/charts/workload-variant-autoscaler/values.yaml"
     fi
 
-    # LeaderWorkerSet (WVA dependency; see upstream chart / #910).
-    CHART_VERSION=0.8.0
-    log_info "Installing LeaderWorkerSet version $CHART_VERSION into lws-system namespace"
-    helm upgrade -i lws oci://registry.k8s.io/lws/charts/lws \
-        --version="$CHART_VERSION" \
-        --namespace lws-system \
-        --create-namespace \
-        --wait --timeout 300s
+    if [ "$NAMESPACE_SCOPED" != "true" ]; then
+        # LeaderWorkerSet (WVA dependency; see upstream chart / #910).
+        CHART_VERSION=0.8.0
+        log_info "Installing LeaderWorkerSet version $CHART_VERSION into lws-system namespace"
+        helm upgrade -i lws oci://registry.k8s.io/lws/charts/lws \
+            --version="$CHART_VERSION" \
+            --namespace lws-system \
+            --create-namespace \
+            --wait --timeout 300s
+    else
+        log_info "Skipping LeaderWorkerSet installation because NAMESPACE_SCOPED=true"
+    fi
 
     log_success "WVA prerequisites complete"
 }
