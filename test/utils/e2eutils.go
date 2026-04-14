@@ -981,14 +981,14 @@ func (p *PrometheusClient) API() promv1.API {
 	return p.client
 }
 
-type authRoundTripper struct {
-	token string
-	rt    http.RoundTripper
+type authTransport struct {
+	transport http.RoundTripper
+	token     string
 }
 
-func (a *authRoundTripper) RoundTrip(req *http.Request) (*http.Response, error) {
-	req.Header.Set("Authorization", "Bearer "+a.token)
-	return a.rt.RoundTrip(req)
+func (t *authTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	req.Header.Set("Authorization", "Bearer "+t.token)
+	return t.transport.RoundTrip(req)
 }
 
 // creates a new Prometheus client for e2e tests
@@ -997,17 +997,24 @@ func NewPrometheusClient(baseURL string, insecureSkipVerify bool) (*PrometheusCl
 		Address: baseURL,
 	}
 
+	// We copy DefaultTransport safely to preserve generic settings
 	roundTripper := promAPI.DefaultRoundTripper
-	if rt, ok := roundTripper.(*http.Transport); ok {
-		if insecureSkipVerify {
-			rt.TLSClientConfig = &tls.Config{InsecureSkipVerify: true}
+	if insecureSkipVerify {
+		if ht, ok := roundTripper.(*http.Transport); ok {
+			transportClone := ht.Clone()
+			if transportClone.TLSClientConfig == nil {
+				transportClone.TLSClientConfig = &tls.Config{InsecureSkipVerify: true}
+			} else {
+				transportClone.TLSClientConfig.InsecureSkipVerify = true
+			}
+			roundTripper = transportClone
 		}
 	}
 
 	if token := os.Getenv("PROMETHEUS_TOKEN"); token != "" {
-		roundTripper = &authRoundTripper{
-			token: token,
-			rt:    roundTripper,
+		roundTripper = &authTransport{
+			transport: roundTripper,
+			token:     token,
 		}
 	}
 	config.RoundTripper = roundTripper
