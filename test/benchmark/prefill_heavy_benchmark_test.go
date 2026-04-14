@@ -81,6 +81,8 @@ var _ = Describe("Prefill Heavy Workload Benchmark", Ordered, Label("benchmark",
 		res    ScenarioResources
 	)
 
+	var modelsList []string
+
 	BeforeEach(func() {
 		ctx, cancel = context.WithCancel(context.Background()) //nolint:fatcontext // Ginkgo BeforeEach requires reassigning outer ctx
 		res = ScenarioResources{
@@ -89,6 +91,13 @@ var _ = Describe("Prefill Heavy Workload Benchmark", Ordered, Label("benchmark",
 			VAName:       "prefill-va",
 			HPAName:      "prefill-hpa",
 			JobBaseName:  "prefill-ms",
+		}
+
+		ml := os.Getenv("MODELS_LIST")
+		if ml != "" {
+			modelsList = strings.Split(ml, ",")
+		} else {
+			modelsList = []string{benchCfg.ModelID}
 		}
 	})
 
@@ -99,54 +108,86 @@ var _ = Describe("Prefill Heavy Workload Benchmark", Ordered, Label("benchmark",
 	// cleanupAutoscalers removes leftover HPAs and VAs from previous tests to avoid conflicts.
 	cleanupAutoscalers := func() {
 		GinkgoWriter.Println("Cleaning up existing autoscalers...")
-		_ = k8sClient.AutoscalingV2().HorizontalPodAutoscalers(benchCfg.LLMDNamespace).Delete(ctx, res.HPAName+"-standard-hpa", metav1.DeleteOptions{})
-		_ = k8sClient.AutoscalingV2().HorizontalPodAutoscalers(benchCfg.LLMDNamespace).Delete(ctx, res.HPAName+"-hpa", metav1.DeleteOptions{})
-		_ = fixtures.DeleteVariantAutoscaling(ctx, crClient, benchCfg.LLMDNamespace, res.VAName)
+		for _, m := range modelsList {
+			safePostfix := strings.ReplaceAll(strings.ReplaceAll(strings.ToLower(m), "/", "-"), ".", "-")
+			hpaName := res.HPAName + "-" + safePostfix
+			vaName := res.VAName + "-" + safePostfix
+			_ = k8sClient.AutoscalingV2().HorizontalPodAutoscalers(benchCfg.LLMDNamespace).Delete(ctx, hpaName+"-standard-hpa", metav1.DeleteOptions{})
+			_ = k8sClient.AutoscalingV2().HorizontalPodAutoscalers(benchCfg.LLMDNamespace).Delete(ctx, hpaName+"-hpa", metav1.DeleteOptions{})
+			_ = fixtures.DeleteVariantAutoscaling(ctx, crClient, benchCfg.LLMDNamespace, vaName)
+		}
 		time.Sleep(3 * time.Second)
 	}
 
-	// findInfraDecodeDeployment discovers the Helm-deployed decode deployment.
-	// We reuse this deployment instead of creating a new one because the Gateway/EPP
-	// routing is configured to match its labels (InferencePool selector).
-	findInfraDecodeDeployment := func() string {
-		By("Finding Helm-deployed decode deployment for Gateway-compatible routing")
+	// findInfraDecodeDeployments discovers the Helm-deployed decode deployments.
+	// We reuse these deployments instead of creating new ones.
+	findInfraDecodeDeployments := func() map[string]string {
+		By("Finding Helm-deployed decode deployments for Gateway-compatible routing")
 		deployments, err := k8sClient.AppsV1().Deployments(benchCfg.LLMDNamespace).List(ctx, metav1.ListOptions{})
 		Expect(err).NotTo(HaveOccurred(), "Failed to list deployments")
-		for i := range deployments.Items {
-			d := &deployments.Items[i]
-			if strings.HasSuffix(d.Name, "-decode") && strings.Contains(d.Name, "modelservice") {
-				GinkgoWriter.Printf("  Found infra decode deployment: %s\n", d.Name)
-				return d.Name
+
+		modelDeployMap := make(map[string]string)
+		for _, m := range modelsList {
+			safePostfix := strings.ReplaceAll(strings.ReplaceAll(strings.ToLower(m), "/", "-"), ".", "-")
+			found := false
+			for i := range deployments.Items {
+				d := &deployments.Items[i]
+				// If strictly multi-model, we check safe postfix
+				if strings.HasSuffix(d.Name, "-decode") && strings.Contains(d.Name, safePostfix) {
+					GinkgoWriter.Printf("  Found infra decode deployment for %s: %s\n", m, d.Name)
+					modelDeployMap[m] = d.Name
+					found = true
+					break
+				}
+			}
+			if !found && len(modelsList) == 1 {
+				// Fallback to legacy single-model string match
+				for i := range deployments.Items {
+					d := &deployments.Items[i]
+					if strings.HasSuffix(d.Name, "-decode") && strings.Contains(d.Name, "modelservice") {
+						GinkgoWriter.Printf("  Found fallback core infra decode deployment: %s\n", d.Name)
+						modelDeployMap[m] = d.Name
+						found = true
+						break
+					}
+				}
+			}
+			if !found {
+				Fail("No Helm-deployed decode deployment found in namespace " + benchCfg.LLMDNamespace + " for model " + m)
 			}
 		}
-		Fail("No Helm-deployed decode deployment found in namespace " + benchCfg.LLMDNamespace)
-		return ""
+		return modelDeployMap
 	}
 
-	// ensureInfraDeploymentReady scales the Helm-deployed model service to 1 replica and waits for readiness.
-	ensureInfraDeploymentReady := func() {
-		By("Ensuring infra decode deployment is scaled to 1 and ready")
+	// ensureInfraDeploymentsReady scales the Helm-deployed model services to 1 replica and waits for readiness.
+	ensureInfraDeploymentsReady := func(deployMap map[string]string) {
+		By("Ensuring infra decode deployments are scaled to 1 and ready")
 		one := int32(1)
-		deployment, err := k8sClient.AppsV1().Deployments(benchCfg.LLMDNamespace).Get(ctx, res.DeploymentName, metav1.GetOptions{})
-		Expect(err).NotTo(HaveOccurred())
-		if deployment.Spec.Replicas == nil || *deployment.Spec.Replicas != 1 {
-			deployment.Spec.Replicas = &one
-			_, err = k8sClient.AppsV1().Deployments(benchCfg.LLMDNamespace).Update(ctx, deployment, metav1.UpdateOptions{})
-			Expect(err).NotTo(HaveOccurred(), "Failed to scale infra deployment to 1")
-			GinkgoWriter.Printf("  Scaled %s to 1 replica\n", res.DeploymentName)
+
+		for _, depName := range deployMap {
+			deployment, err := k8sClient.AppsV1().Deployments(benchCfg.LLMDNamespace).Get(ctx, depName, metav1.GetOptions{})
+			Expect(err).NotTo(HaveOccurred())
+			if deployment.Spec.Replicas == nil || *deployment.Spec.Replicas != 1 {
+				deployment.Spec.Replicas = &one
+				_, err = k8sClient.AppsV1().Deployments(benchCfg.LLMDNamespace).Update(ctx, deployment, metav1.UpdateOptions{})
+				Expect(err).NotTo(HaveOccurred(), "Failed to scale infra deployment to 1")
+				GinkgoWriter.Printf("  Scaled %s to 1 replica\n", depName)
+			}
 		}
 
-		By("Waiting for infra deployment to have at least 1 ready replica")
+		By("Waiting for infra deployments to have at least 1 ready replica")
 		Eventually(func(g Gomega) {
-			d, getErr := k8sClient.AppsV1().Deployments(benchCfg.LLMDNamespace).Get(ctx, res.DeploymentName, metav1.GetOptions{})
-			g.Expect(getErr).NotTo(HaveOccurred())
-			spec := int32(0)
-			if d.Spec.Replicas != nil {
-				spec = *d.Spec.Replicas
+			for _, depName := range deployMap {
+				d, getErr := k8sClient.AppsV1().Deployments(benchCfg.LLMDNamespace).Get(ctx, depName, metav1.GetOptions{})
+				g.Expect(getErr).NotTo(HaveOccurred())
+				spec := int32(0)
+				if d.Spec.Replicas != nil {
+					spec = *d.Spec.Replicas
+				}
+				GinkgoWriter.Printf("  %s: spec=%d, ready=%d\n", depName, spec, d.Status.ReadyReplicas)
+				g.Expect(d.Status.ReadyReplicas).To(BeNumerically(">=", 1), "Deployment should have at least 1 ready replica")
 			}
-			GinkgoWriter.Printf("  %s: spec=%d, ready=%d\n", res.DeploymentName, spec, d.Status.ReadyReplicas)
-			g.Expect(d.Status.ReadyReplicas).To(BeNumerically(">=", 1), "Deployment should have at least 1 ready replica")
-		}, 5*time.Minute, 10*time.Second).Should(Succeed())
+		}, 6*time.Minute, 10*time.Second).Should(Succeed())
 	}
 
 	// dumpExternalMetricsDiagnostics logs the state of pods serving the external metrics API.
@@ -192,18 +233,22 @@ var _ = Describe("Prefill Heavy Workload Benchmark", Ordered, Label("benchmark",
 	// waitForVAAndMetrics waits for the VA to stabilize. External metrics and Prometheus
 	// checks are best-effort warnings — the benchmark proceeds even if they fail, since
 	// the prometheus-adapter may be transiently unavailable.
-	waitForVAAndMetrics := func() {
-		By("Waiting for VA to stabilize (NumReplicas set)")
+	waitForVAsAndMetrics := func() {
+		By("Waiting for VAs to stabilize natively across all targets (NumReplicas >= 1)")
 		Eventually(func(g Gomega) {
-			currentVA := &variantautoscalingv1alpha1.VariantAutoscaling{}
-			err := crClient.Get(ctx, client.ObjectKey{
-				Namespace: benchCfg.LLMDNamespace,
-				Name:      res.VAName,
-			}, currentVA)
-			g.Expect(err).NotTo(HaveOccurred())
-			g.Expect(currentVA.Status.DesiredOptimizedAlloc.NumReplicas).NotTo(BeNil(), "NumReplicas should be set")
-			g.Expect(*currentVA.Status.DesiredOptimizedAlloc.NumReplicas).To(BeNumerically(">=", 1), "VA should have optimized >= 1")
-			GinkgoWriter.Printf("VA status: desired replicas = %d\n", *currentVA.Status.DesiredOptimizedAlloc.NumReplicas)
+			for _, m := range modelsList {
+				safePostfix := strings.ReplaceAll(strings.ReplaceAll(strings.ToLower(m), "/", "-"), ".", "-")
+				vaName := res.VAName + "-" + safePostfix
+				currentVA := &variantautoscalingv1alpha1.VariantAutoscaling{}
+				err := crClient.Get(ctx, client.ObjectKey{
+					Namespace: benchCfg.LLMDNamespace,
+					Name:      vaName,
+				}, currentVA)
+				g.Expect(err).NotTo(HaveOccurred())
+				g.Expect(currentVA.Status.DesiredOptimizedAlloc.NumReplicas).NotTo(BeNil(), "NumReplicas should be set for "+vaName)
+				g.Expect(*currentVA.Status.DesiredOptimizedAlloc.NumReplicas).To(BeNumerically(">=", 1), "VA should have optimized >= 1 for "+vaName)
+				GinkgoWriter.Printf("VA status %s: desired replicas = %d\n", vaName, *currentVA.Status.DesiredOptimizedAlloc.NumReplicas)
+			}
 		}, 5*time.Minute, 10*time.Second).Should(Succeed())
 
 		By("Checking external metrics API (best-effort, non-blocking)")
@@ -218,12 +263,21 @@ var _ = Describe("Prefill Heavy Workload Benchmark", Ordered, Label("benchmark",
 				return false
 			}
 			s := string(result)
-			if strings.Contains(s, "wva_desired_replicas") && strings.Contains(s, res.VAName) {
-				GinkgoWriter.Printf("External metrics API confirmed: wva_desired_replicas available for %s\n", res.VAName)
+			// check if wva_desired_replicas serves results for ALL targets
+			allFound := true
+			for _, m := range modelsList {
+				safePostfix := strings.ReplaceAll(strings.ReplaceAll(strings.ToLower(m), "/", "-"), ".", "-")
+				vaName := res.VAName + "-" + safePostfix
+				if !(strings.Contains(s, "wva_desired_replicas") && strings.Contains(s, vaName)) {
+					allFound = false
+					GinkgoWriter.Printf("  External metrics API responded but metric not found for %s\n", vaName)
+				}
+			}
+			if allFound {
+				GinkgoWriter.Printf("External metrics API confirmed: wva_desired_replicas available for all VAs\n")
 				externalMetricsOK = true
 				return true
 			}
-			GinkgoWriter.Printf("  External metrics API responded but metric not found for %s\n", res.VAName)
 			return false
 		}, 3*time.Minute, 10*time.Second).Should(Or(BeTrue(), Not(BeTrue())))
 		if !externalMetricsOK {
@@ -438,37 +492,45 @@ var _ = Describe("Prefill Heavy Workload Benchmark", Ordered, Label("benchmark",
 		}
 	}
 
-	runPrefillBenchmark := func(autoscalerType string) {
+	runPrefillBenchmark := func(autoscalerType string, deployMap map[string]string) {
 		ensureEPPConfig()
-		ensureInfraDeploymentReady()
 		verifyEPPConfig()
 		dumpInfrastructureDiagnostics()
 
 		gatewayURL := fmt.Sprintf("http://%s.%s.svc.cluster.local:%d",
 			benchCfg.GatewayServiceName, benchCfg.LLMDNamespace, benchCfg.GatewayServicePort)
 
-		By("Verifying Gateway connectivity (hard requirement — traffic must flow through EPP)")
+		By("Verifying Gateway connectivity for ALL models")
 		Eventually(func(g Gomega) {
-			err := VerifyGatewayConnectivity(ctx, k8sClient, benchCfg.LLMDNamespace, gatewayURL, benchCfg.ModelID)
-			g.Expect(err).NotTo(HaveOccurred(), "Gateway not ready yet")
-		}, 5*time.Minute, 15*time.Second).Should(Succeed(), "Gateway connectivity check failed — EPP must be reachable via Gateway")
-		GinkgoWriter.Println("  Gateway connectivity verified")
+			for _, m := range modelsList {
+				targetURL := gatewayURL
+				if len(modelsList) > 1 {
+					safePostfix := strings.ReplaceAll(strings.ReplaceAll(strings.ToLower(m), "/", "-"), ".", "-")
+					targetURL = gatewayURL + "/" + safePostfix
+				}
+				err := VerifyGatewayConnectivity(ctx, k8sClient, benchCfg.LLMDNamespace, targetURL, m)
+				g.Expect(err).NotTo(HaveOccurred(), "Gateway not ready yet for %s", m)
+			}
+		}, 6*time.Minute, 15*time.Second).Should(Succeed(), "Gateway connectivity check failed")
+		GinkgoWriter.Println("  Gateway connectivity verified for all multi-model routes")
 
 		targetURL := gatewayURL
 		GinkgoWriter.Printf("  Using Gateway URL (traffic flows through EPP): %s\n", targetURL)
 
 		By("Checking Prometheus metric availability before load")
-		for _, q := range []string{
-			fmt.Sprintf(`vllm:kv_cache_usage_perc{namespace="%s"}`, benchCfg.LLMDNamespace),
-			fmt.Sprintf(`vllm:num_requests_waiting{namespace="%s"}`, benchCfg.LLMDNamespace),
-			fmt.Sprintf(`inference_extension_flow_control_queue_size{namespace="%s"}`, benchCfg.LLMDNamespace),
-			fmt.Sprintf(`kube_deployment_status_replicas{deployment="%s",namespace="%s"}`, res.DeploymentName, benchCfg.LLMDNamespace),
-		} {
-			val, err := QueryRangeAvg(promClient.API(), q, time.Now().Add(-2*time.Minute), time.Now(), 30*time.Second)
-			if err != nil {
-				GinkgoWriter.Printf("  Metric check: %s → NOT FOUND (%v)\n", q, err)
-			} else {
-				GinkgoWriter.Printf("  Metric check: %s → %.4f\n", q, val)
+		for _, m := range modelsList {
+			depName := deployMap[m]
+			for _, q := range []string{
+				fmt.Sprintf(`vllm:kv_cache_usage_perc{namespace="%s"}`, benchCfg.LLMDNamespace), // TODO labels tracking model
+				fmt.Sprintf(`inference_extension_flow_control_queue_size{namespace="%s"}`, benchCfg.LLMDNamespace),
+				fmt.Sprintf(`kube_deployment_status_replicas{deployment="%s",namespace="%s"}`, depName, benchCfg.LLMDNamespace),
+			} {
+				val, err := QueryRangeAvg(promClient.API(), q, time.Now().Add(-2*time.Minute), time.Now(), 30*time.Second)
+				if err != nil {
+					GinkgoWriter.Printf("  Metric check %s: %s → NOT FOUND (%v)\n", m, q, err)
+				} else {
+					GinkgoWriter.Printf("  Metric check %s: %s → %.4f\n", m, q, val)
+				}
 			}
 		}
 
@@ -484,25 +546,49 @@ var _ = Describe("Prefill Heavy Workload Benchmark", Ordered, Label("benchmark",
 			}
 		}
 
-		By("Launching GuideLLM Load Generator")
+		By("Launching GuideLLM Load Generator for All Models")
+		var jobNames []string
 
-		err = CreateGuideLLMJobWithArgs(
-			ctx, k8sClient, benchCfg.LLMDNamespace, res.ModelService,
-			targetURL, benchCfg.ModelID,
-		)
-		Expect(err).NotTo(HaveOccurred(), "Failed to create GuideLLM load job")
+		for _, m := range modelsList {
+			safePostfix := strings.ReplaceAll(strings.ReplaceAll(strings.ToLower(m), "/", "-"), ".", "-")
+			targetURL := gatewayURL
+			if len(modelsList) > 1 {
+				targetURL = gatewayURL + "/" + safePostfix + "/v1"
+			} else {
+				targetURL = gatewayURL + "/v1"
+			}
+			// Create a distinct job name for this target
+			jobName := res.ModelService + "-" + safePostfix + "-load"
+			jobNames = append(jobNames, jobName)
+
+			GinkgoWriter.Printf("  Dispatching load job %s to %s for model %s\n", jobName, targetURL, m)
+
+			err = CreateGuideLLMJobWithArgs(
+				ctx, k8sClient, benchCfg.LLMDNamespace, res.ModelService+"-"+safePostfix,
+				targetURL, m,
+			)
+			Expect(err).NotTo(HaveOccurred(), "Failed to create GuideLLM load job for "+m)
+		}
 
 		loadStart := time.Now()
-		jobName := res.ModelService + "-load"
 
 		By("Monitoring replicas and HPA status while GuideLLM runs (~10 min)")
-		var timeline []ReplicaSnap
-		var metricsTimeline []MetricSnap
-		var maxReplicas int32 = 1
+		var timelineMap = make(map[string][]ReplicaSnap)
+		var metricsTimelineMap = make(map[string][]MetricSnap)
+		var maxReplicasMap = make(map[string]int32)
+		for _, m := range modelsList {
+			maxReplicasMap[m] = 1
+		}
 		done := make(chan error, 1)
 
 		go func() {
-			done <- WaitForJobCompletion(ctx, k8sClient, benchCfg.LLMDNamespace, jobName, 25*time.Minute)
+			var firstErr error
+			for _, jn := range jobNames {
+				if err := WaitForJobCompletion(ctx, k8sClient, benchCfg.LLMDNamespace, jn, 25*time.Minute); err != nil && firstErr == nil {
+					firstErr = err
+				}
+			}
+			done <- firstErr
 		}()
 
 		ticker := time.NewTicker(15 * time.Second)
@@ -513,74 +599,86 @@ var _ = Describe("Prefill Heavy Workload Benchmark", Ordered, Label("benchmark",
 			select {
 			case jobErr := <-done:
 				if jobErr != nil {
-					logs, logErr := GetJobPodLogs(ctx, k8sClient, benchCfg.LLMDNamespace, jobName)
-					if logErr == nil {
-						GinkgoWriter.Printf("\n--- GuideLLM Job Failed. Pod Logs ---\n%s\n---------------------------\n", logs)
+					for _, jn := range jobNames {
+						logs, logErr := GetJobPodLogs(ctx, k8sClient, benchCfg.LLMDNamespace, jn)
+						if logErr == nil && logs != "" {
+							GinkgoWriter.Printf("\n--- GuideLLM Job %s Failed. Pod Logs ---\n%s\n---------------------------\n", jn, logs)
+						}
 					}
 				}
 				Expect(jobErr).NotTo(HaveOccurred(), "GuideLLM job failed or timed out")
 				break monitorLoop
 			case <-ticker.C:
 				elapsed := time.Since(loadStart).Seconds()
-				deployment, depErr := k8sClient.AppsV1().Deployments(benchCfg.LLMDNamespace).Get(ctx, res.DeploymentName, metav1.GetOptions{})
-				if depErr == nil {
-					spec := *deployment.Spec.Replicas
-					ready := deployment.Status.ReadyReplicas
-					if spec > maxReplicas {
-						maxReplicas = spec
-					}
-					timeline = append(timeline, ReplicaSnap{ElapsedSec: elapsed, SpecReplicas: spec, ReadyReplicas: ready})
-					GinkgoWriter.Printf("  [%.0fs] replicas: spec=%d ready=%d\n", elapsed, spec, ready)
-				}
 
-				// Sample KV cache, vLLM queue depth, and EPP queue depth from Prometheus
-				qdQuery := fmt.Sprintf(`avg(vllm:num_requests_waiting{namespace="%s"})`, benchCfg.LLMDNamespace)
-				kvQuery := fmt.Sprintf(`avg(vllm:kv_cache_usage_perc{namespace="%s"})`, benchCfg.LLMDNamespace)
-				eppQDQuery := fmt.Sprintf(`sum(inference_extension_flow_control_queue_size{namespace="%s"})`, benchCfg.LLMDNamespace)
-				snap := MetricSnap{ElapsedSec: elapsed}
-				if qdResult, _, qdErr := promClient.API().Query(ctx, qdQuery, time.Now()); qdErr == nil {
-					if vec, ok := qdResult.(model.Vector); ok && len(vec) > 0 {
-						snap.QueueDepth = float64(vec[0].Value)
+				// Monitor all deployments explicitly
+				for _, m := range modelsList {
+					depName := deployMap[m]
+					safePostfix := strings.ReplaceAll(strings.ReplaceAll(strings.ToLower(m), "/", "-"), ".", "-")
+					eppDepName := "gaie-" + safePostfix + "-epp"
+
+					deployment, depErr := k8sClient.AppsV1().Deployments(benchCfg.LLMDNamespace).Get(ctx, depName, metav1.GetOptions{})
+					if depErr == nil {
+						spec := *deployment.Spec.Replicas
+						ready := deployment.Status.ReadyReplicas
+						if spec > maxReplicasMap[m] {
+							maxReplicasMap[m] = spec
+						}
+						timelineMap[m] = append(timelineMap[m], ReplicaSnap{ElapsedSec: elapsed, SpecReplicas: spec, ReadyReplicas: ready})
+						GinkgoWriter.Printf("  [%.0fs] [%s] %s replicas: spec=%d ready=%d\n", elapsed, m, depName, spec, ready)
 					}
-				}
-				if kvResult, _, kvErr := promClient.API().Query(ctx, kvQuery, time.Now()); kvErr == nil {
-					if vec, ok := kvResult.(model.Vector); ok && len(vec) > 0 {
-						snap.KVCache = float64(vec[0].Value)
+
+					qdQuery := fmt.Sprintf(`avg(vllm:num_requests_waiting{namespace="%s", pod=~"%s-.*"})`, benchCfg.LLMDNamespace, depName)
+					kvQuery := fmt.Sprintf(`avg(vllm:kv_cache_usage_perc{namespace="%s", pod=~"%s-.*"})`, benchCfg.LLMDNamespace, depName)
+					eppQDQuery := fmt.Sprintf(`sum(inference_extension_flow_control_queue_size{namespace="%s", pod=~"%s-.*"})`, benchCfg.LLMDNamespace, eppDepName)
+
+					snap := MetricSnap{ElapsedSec: elapsed}
+					if qdResult, _, qdErr := promClient.API().Query(ctx, qdQuery, time.Now()); qdErr == nil {
+						if vec, ok := qdResult.(model.Vector); ok && len(vec) > 0 {
+							snap.QueueDepth = float64(vec[0].Value)
+						}
 					}
-				}
-				if eppResult, _, eppErr := promClient.API().Query(ctx, eppQDQuery, time.Now()); eppErr == nil {
-					if vec, ok := eppResult.(model.Vector); ok && len(vec) > 0 {
-						snap.EPPQueueDepth = float64(vec[0].Value)
+					if kvResult, _, kvErr := promClient.API().Query(ctx, kvQuery, time.Now()); kvErr == nil {
+						if vec, ok := kvResult.(model.Vector); ok && len(vec) > 0 {
+							snap.KVCache = float64(vec[0].Value)
+						}
 					}
+					if eppResult, _, eppErr := promClient.API().Query(ctx, eppQDQuery, time.Now()); eppErr == nil {
+						if vec, ok := eppResult.(model.Vector); ok && len(vec) > 0 {
+							snap.EPPQueueDepth = float64(vec[0].Value)
+						}
+					}
+					metricsTimelineMap[m] = append(metricsTimelineMap[m], snap)
+					GinkgoWriter.Printf("  [%.0fs] [%s] queue_depth=%.1f epp_queue=%.1f kv_cache=%.3f\n", elapsed, m, snap.QueueDepth, snap.EPPQueueDepth, snap.KVCache)
 				}
-				metricsTimeline = append(metricsTimeline, snap)
-				GinkgoWriter.Printf("  [%.0fs] queue_depth=%.1f epp_queue=%.1f kv_cache=%.3f\n", elapsed, snap.QueueDepth, snap.EPPQueueDepth, snap.KVCache)
 
 				// Pod-level health check for crash detection
-				pods, podErr := k8sClient.CoreV1().Pods(benchCfg.LLMDNamespace).List(ctx, metav1.ListOptions{
-					LabelSelector: "app=" + res.DeploymentName,
-				})
-				if podErr == nil {
-					for i := range pods.Items {
-						p := &pods.Items[i]
-						for _, cs := range p.Status.ContainerStatuses {
-							if cs.RestartCount > 0 {
-								reason := "running"
-								if cs.State.Waiting != nil {
-									reason = cs.State.Waiting.Reason
-								} else if cs.State.Terminated != nil {
-									reason = fmt.Sprintf("terminated(%s,exit=%d)", cs.State.Terminated.Reason, cs.State.Terminated.ExitCode)
-								}
-								GinkgoWriter.Printf("  [%.0fs] Pod %s: restarts=%d state=%s\n", elapsed, p.Name, cs.RestartCount, reason)
+				var allPods []corev1.Pod
+				for _, depName := range deployMap {
+					pods, podErr := k8sClient.CoreV1().Pods(benchCfg.LLMDNamespace).List(ctx, metav1.ListOptions{
+						LabelSelector: "app=" + depName,
+					})
+					if podErr == nil {
+						allPods = append(allPods, pods.Items...)
+					}
+				}
+				for _, p := range allPods {
+					for _, cs := range p.Status.ContainerStatuses {
+						if cs.RestartCount > 0 {
+							reason := "running"
+							if cs.State.Waiting != nil {
+								reason = cs.State.Waiting.Reason
+							} else if cs.State.Terminated != nil {
+								reason = fmt.Sprintf("terminated(%s,exit=%d)", cs.State.Terminated.Reason, cs.State.Terminated.ExitCode)
 							}
+							GinkgoWriter.Printf("  [%.0fs] Pod %s: restarts=%d state=%s\n", elapsed, p.Name, cs.RestartCount, reason)
 						}
 					}
 				}
 
 				hpaList, hpaErr := k8sClient.AutoscalingV2().HorizontalPodAutoscalers(benchCfg.LLMDNamespace).List(ctx, metav1.ListOptions{})
 				if hpaErr == nil {
-					for i := range hpaList.Items {
-						hpa := &hpaList.Items[i]
+					for _, hpa := range hpaList.Items {
 						GinkgoWriter.Printf("  [%.0fs] HPA %s: current=%d desired=%d\n", elapsed, hpa.Name, hpa.Status.CurrentReplicas, hpa.Status.DesiredReplicas)
 					}
 				}
@@ -589,210 +687,186 @@ var _ = Describe("Prefill Heavy Workload Benchmark", Ordered, Label("benchmark",
 		loadEnd := time.Now()
 		loadDuration := loadEnd.Sub(loadStart).Seconds()
 
-		By("Extracting GuideLLM results from pod logs")
-		logs, err := GetJobPodLogs(ctx, k8sClient, benchCfg.LLMDNamespace, jobName)
-		Expect(err).NotTo(HaveOccurred(), "Failed to get GuideLLM pod logs")
+		By("Evaluating GuideLLM results and Prometheus aggregations per model")
+		for i, m := range modelsList {
+			depName := deployMap[m]
+			jobName := jobNames[i]
+			safePostfix := strings.ReplaceAll(strings.ReplaceAll(strings.ToLower(m), "/", "-"), ".", "-")
+			eppDepName := "gaie-" + safePostfix + "-epp"
 
-		var guidellmRaw json.RawMessage
-		var ttftJSON, itlJSON, throughputJSON json.RawMessage
-
-		if idx := strings.Index(logs, "=== BENCHMARK JSON ==="); idx != -1 {
-			jsonStr := strings.TrimSpace(logs[idx+len("=== BENCHMARK JSON ==="):])
-			guidellmRaw = json.RawMessage(jsonStr)
-
-			var parsed map[string]interface{}
-			if jsonErr := json.Unmarshal([]byte(jsonStr), &parsed); jsonErr == nil {
-				// GuideLLM stores metrics at benchmarks[0].metrics.<metric_name>.successful
-				extractGuideLLMMetric(&parsed, "time_to_first_token_ms", &ttftJSON)
-				extractGuideLLMMetric(&parsed, "inter_token_latency_ms", &itlJSON)
-				extractGuideLLMMetric(&parsed, "output_tokens_per_second", &throughputJSON)
-
-				// Also extract request totals for diagnostics
-				var requestTotals json.RawMessage
-				extractGuideLLMMetric(&parsed, "request_totals", &requestTotals)
-				if requestTotals != nil {
-					GinkgoWriter.Printf("  Request Totals: %s\n", string(requestTotals))
-				}
-			} else {
-				GinkgoWriter.Printf("Warning: failed to parse GuideLLM JSON: %v\n", jsonErr)
-				GinkgoWriter.Printf("Raw JSON (first 1000 chars): %s\n", truncateHead(jsonStr, 1000))
+			qdAvg, queryErr := QueryRangeAvg(
+				promClient.API(),
+				fmt.Sprintf(`avg(vllm:num_requests_waiting{namespace="%s", pod=~"%s-.*"})`, benchCfg.LLMDNamespace, depName),
+				loadStart, loadEnd, 30*time.Second,
+			)
+			if queryErr != nil {
+				GinkgoWriter.Printf("Warning: failed to query queue depth avg for %s: %v\n", m, queryErr)
 			}
-		} else {
-			GinkgoWriter.Println("Warning: '=== BENCHMARK JSON ===' marker not found in pod logs")
-			GinkgoWriter.Printf("Pod log tail (last 500 chars): %s\n", truncateTail(logs, 500))
-		}
 
-		By("Querying Prometheus for Replicas, Queue Depth, and KV Cache")
-		replicaAvg, err := QueryRangeAvg(
-			promClient.API(),
-			fmt.Sprintf(`avg(kube_deployment_status_replicas{deployment="%s", namespace="%s"})`, res.DeploymentName, benchCfg.LLMDNamespace),
-			loadStart, loadEnd, 30*time.Second,
-		)
-		if err != nil {
-			GinkgoWriter.Printf("Warning: failed to query replica avg: %v\n", err)
-		}
+			kvAvg, queryErr := QueryRangeAvg(
+				promClient.API(),
+				fmt.Sprintf(`avg(vllm:kv_cache_usage_perc{namespace="%s", pod=~"%s-.*"})`, benchCfg.LLMDNamespace, depName),
+				loadStart, loadEnd, 30*time.Second,
+			)
+			if queryErr != nil {
+				GinkgoWriter.Printf("Warning: failed to query KV cache avg for %s: %v\n", m, queryErr)
+			}
 
-		qdAvg, err := QueryRangeAvg(
-			promClient.API(),
-			fmt.Sprintf(`avg(vllm:num_requests_waiting{namespace="%s"})`, benchCfg.LLMDNamespace),
-			loadStart, loadEnd, 30*time.Second,
-		)
-		if err != nil {
-			GinkgoWriter.Printf("Warning: failed to query queue depth avg: %v\n", err)
-		}
+			eppQDAvg, queryErr := QueryRangeAvg(
+				promClient.API(),
+				fmt.Sprintf(`sum(inference_extension_flow_control_queue_size{namespace="%s", pod=~"%s-.*"})`, benchCfg.LLMDNamespace, eppDepName),
+				loadStart, loadEnd, 30*time.Second,
+			)
+			if queryErr != nil {
+				GinkgoWriter.Printf("Warning: failed to query EPP queue depth avg for %s: %v\n", m, queryErr)
+			}
 
-		kvAvg, err := QueryRangeAvg(
-			promClient.API(),
-			fmt.Sprintf(`avg(vllm:kv_cache_usage_perc{namespace="%s"})`, benchCfg.LLMDNamespace),
-			loadStart, loadEnd, 30*time.Second,
-		)
-		if err != nil {
-			GinkgoWriter.Printf("Warning: failed to query KV cache avg: %v\n", err)
-		}
-
-		eppQDAvg, err := QueryRangeAvg(
-			promClient.API(),
-			fmt.Sprintf(`sum(inference_extension_flow_control_queue_size{namespace="%s"})`, benchCfg.LLMDNamespace),
-			loadStart, loadEnd, 30*time.Second,
-		)
-		if err != nil {
-			GinkgoWriter.Printf("Warning: failed to query EPP queue depth avg: %v\n", err)
-		}
-
-		// Collect pod placement info (node, GPU, startup time)
-		By("Collecting pod placement details for report")
-		var podInfos []PodInfo
-		// Try multiple label selectors: Helm chart uses llm-d.ai/role=decode,
-		// fall back to app=<deployment> for custom deployments
-		var decodePods *corev1.PodList
-		var podListErr error
-		for _, sel := range []string{
-			"llm-d.ai/role=decode",
-			"app=" + res.DeploymentName,
-		} {
-			decodePods, podListErr = k8sClient.CoreV1().Pods(benchCfg.LLMDNamespace).List(ctx, metav1.ListOptions{
-				LabelSelector: sel,
+			var podInfos []PodInfo
+			decodePods, podListErr := k8sClient.CoreV1().Pods(benchCfg.LLMDNamespace).List(ctx, metav1.ListOptions{
+				LabelSelector: "app=" + depName,
 			})
-			if podListErr == nil && len(decodePods.Items) > 0 {
-				GinkgoWriter.Printf("  Found %d pods with selector %s\n", len(decodePods.Items), sel)
-				break
-			}
-		}
-		if podListErr == nil {
-			for i := range decodePods.Items {
-				p := &decodePods.Items[i]
-				gpu := "Unknown"
-				if p.Spec.NodeName != "" {
-					node, nodeErr := k8sClient.CoreV1().Nodes().Get(ctx, p.Spec.NodeName, metav1.GetOptions{})
-					if nodeErr == nil {
-						if g, ok := node.Labels["nvidia.com/gpu.product"]; ok {
-							gpu = g
-						} else if g, ok := node.Labels["accelerator"]; ok {
-							gpu = g
-						}
-					}
-				}
-				var startupSec float64
-				for _, cond := range p.Status.Conditions {
-					if cond.Type == corev1.PodReady && cond.Status == corev1.ConditionTrue {
-						startupSec = cond.LastTransitionTime.Sub(p.CreationTimestamp.Time).Seconds()
-						break
-					}
-				}
-				podInfos = append(podInfos, PodInfo{
-					Name:       p.Name,
-					Node:       p.Spec.NodeName,
-					GPU:        gpu,
-					StartupSec: startupSec,
-				})
-				GinkgoWriter.Printf("  Pod: %s  Node: %s  GPU: %s  Startup: %.0fs\n", p.Name, p.Spec.NodeName, gpu, startupSec)
-			}
-		}
-
-		vaConfig := "Min Replicas: 1, Max Replicas: 10, Cost Factor: 10.0"
-		hpaConfig := "Min Replicas: 1, Max Replicas: 10 | Scale Up: stabilizationWindow=0s, policy=10 Pods/150s | Scale Down: stabilizationWindow=240s, policy=10 Pods/150s"
-
-		// Extract error counts and achieved RPS from GuideLLM output
-		var errorCount, incompleteCount, completedCount int
-		var achievedRPS float64
-		if guidellmRaw != nil {
-			var parsed map[string]interface{}
-			if jsonErr := json.Unmarshal(guidellmRaw, &parsed); jsonErr == nil {
-				if benchmarks, ok := parsed["benchmarks"].([]interface{}); ok && len(benchmarks) > 0 {
-					if bm, ok := benchmarks[0].(map[string]interface{}); ok {
-						if metrics, ok := bm["metrics"].(map[string]interface{}); ok {
-							if rt, ok := metrics["request_totals"].(map[string]interface{}); ok {
-								if f, ok := rt["errored"].(float64); ok {
-									errorCount = int(f)
-								}
-								if f, ok := rt["incomplete"].(float64); ok {
-									incompleteCount = int(f)
-								}
-								if f, ok := rt["successful"].(float64); ok {
-									completedCount = int(f)
-								}
-							}
-						}
-						if rateObj, ok := bm["rate"].(map[string]interface{}); ok {
-							if f, ok := rateObj["completed_rate"].(float64); ok {
-								achievedRPS = f
+			if podListErr == nil {
+				for j := range decodePods.Items {
+					p := &decodePods.Items[j]
+					gpu := "Unknown"
+					if p.Spec.NodeName != "" {
+						node, nodeErr := k8sClient.CoreV1().Nodes().Get(ctx, p.Spec.NodeName, metav1.GetOptions{})
+						if nodeErr == nil {
+							if g, ok := node.Labels["nvidia.com/gpu.product"]; ok {
+								gpu = g
+							} else if g, ok := node.Labels["accelerator"]; ok {
+								gpu = g
 							}
 						}
 					}
+					var startupSec float64
+					for _, cond := range p.Status.Conditions {
+						if cond.Type == corev1.PodReady && cond.Status == corev1.ConditionTrue {
+							startupSec = cond.LastTransitionTime.Sub(p.CreationTimestamp.Time).Seconds()
+							break
+						}
+					}
+					podInfos = append(podInfos, PodInfo{
+						Name:       p.Name,
+						Node:       p.Spec.NodeName,
+						GPU:        gpu,
+						StartupSec: startupSec,
+					})
 				}
 			}
-		}
-		if achievedRPS == 0 && completedCount > 0 && loadDuration > 0 {
-			achievedRPS = float64(completedCount) / loadDuration
-		}
 
-		result := PrefillResult{
-			AutoscalerType:   autoscalerType,
-			ModelID:          benchCfg.ModelID,
-			VAConfig:         vaConfig,
-			HPAConfig:        hpaConfig,
-			Pods:             podInfos,
-			ReplicaTimeline:  timeline,
-			MetricsTimeline:  metricsTimeline,
-			AvgReplicas:      replicaAvg,
-			MaxReplicas:      maxReplicas,
-			AvgQueueDepth:    qdAvg,
-			AvgEPPQueueDepth: eppQDAvg,
-			AvgKVCache:       kvAvg,
-			AchievedRPS:      achievedRPS,
-			ErrorCount:       errorCount,
-			IncompleteCount:  incompleteCount,
-			TTFT:             ttftJSON,
-			ITL:              itlJSON,
-			Throughput:       throughputJSON,
-			GuideLLMRaw:      guidellmRaw,
-			DurationSec:      loadDuration,
-		}
-		prefillResults = append(prefillResults, result)
+			vaConfig := "Min Replicas: 1, Max Replicas: 10, Cost Factor: 10.0"
+			hpaConfig := "Min Replicas: 1, Max Replicas: 10 | Scale Up: stabilizationWindow=0s, policy=10 Pods/150s | Scale Down: stabilizationWindow=240s, policy=10 Pods/150s"
 
-		GinkgoWriter.Printf("\n========================================\n")
-		GinkgoWriter.Printf("  %s PREFILL BENCHMARK RESULTS\n", autoscalerType)
-		GinkgoWriter.Printf("========================================\n")
-		GinkgoWriter.Printf("  Duration:        %.0fs\n", loadDuration)
-		GinkgoWriter.Printf("  Max Replicas:    %d\n", maxReplicas)
-		GinkgoWriter.Printf("  Avg Replicas:    %.2f\n", replicaAvg)
-		GinkgoWriter.Printf("  Avg Queue Depth: %.2f\n", qdAvg)
-		GinkgoWriter.Printf("  Avg EPP Queue:   %.2f\n", eppQDAvg)
-		GinkgoWriter.Printf("  Avg KV Cache:    %.3f\n", kvAvg)
-		if ttftJSON != nil {
-			GinkgoWriter.Printf("  TTFT:            %s\n", string(ttftJSON))
+			var guidellmRaw json.RawMessage
+			var ttftJSON, itlJSON, throughputJSON json.RawMessage
+			var requestTotals json.RawMessage
+			var errorCount, incompleteCount, completedCount int
+			var achievedRPS float64
+
+			logs, err := GetJobPodLogs(ctx, k8sClient, benchCfg.LLMDNamespace, jobName)
+			if err == nil {
+				if idx := strings.Index(logs, "=== BENCHMARK JSON ==="); idx != -1 {
+					jsonStr := strings.TrimSpace(logs[idx+len("=== BENCHMARK JSON ==="):])
+					guidellmRaw = json.RawMessage(jsonStr)
+
+					var parsed map[string]interface{}
+					if jsonErr := json.Unmarshal(guidellmRaw, &parsed); jsonErr == nil {
+						extractGuideLLMMetric(&parsed, "time_to_first_token_ms", &ttftJSON)
+						extractGuideLLMMetric(&parsed, "inter_token_latency_ms", &itlJSON)
+						extractGuideLLMMetric(&parsed, "output_tokens_per_second", &throughputJSON)
+						extractGuideLLMMetric(&parsed, "request_totals", &requestTotals)
+
+						if benchmarks, ok := parsed["benchmarks"].([]interface{}); ok && len(benchmarks) > 0 {
+							if bm, ok := benchmarks[0].(map[string]interface{}); ok {
+								if metrics, ok := bm["metrics"].(map[string]interface{}); ok {
+									if rt, ok := metrics["request_totals"].(map[string]interface{}); ok {
+										if f, ok := rt["errored"].(float64); ok {
+											errorCount = int(f)
+										}
+										if f, ok := rt["incomplete"].(float64); ok {
+											incompleteCount = int(f)
+										}
+										if f, ok := rt["successful"].(float64); ok {
+											completedCount = int(f)
+										}
+									}
+								}
+								if rateObj, ok := bm["rate"].(map[string]interface{}); ok {
+									if f, ok := rateObj["completed_rate"].(float64); ok {
+										achievedRPS = f
+									}
+								}
+							}
+						}
+					}
+				}
+			}
+
+			if achievedRPS == 0 && completedCount > 0 && loadDuration > 0 {
+				achievedRPS = float64(completedCount) / loadDuration
+			}
+
+			replicaAvg, queryErr := QueryRangeAvg(
+				promClient.API(),
+				fmt.Sprintf(`avg(kube_deployment_status_replicas{deployment="%s", namespace="%s"})`, depName, benchCfg.LLMDNamespace),
+				loadStart, loadEnd, 30*time.Second,
+			)
+			if queryErr != nil {
+				GinkgoWriter.Printf("Warning: failed to query replica avg for %s: %v\n", m, queryErr)
+			}
+
+			result := PrefillResult{
+				AutoscalerType:   autoscalerType,
+				ModelID:          m,
+				VAConfig:         vaConfig,
+				HPAConfig:        hpaConfig,
+				Pods:             podInfos,
+				ReplicaTimeline:  timelineMap[m],
+				MetricsTimeline:  metricsTimelineMap[m],
+				AvgReplicas:      replicaAvg,
+				MaxReplicas:      maxReplicasMap[m],
+				AvgQueueDepth:    qdAvg,
+				AvgEPPQueueDepth: eppQDAvg,
+				AvgKVCache:       kvAvg,
+				AchievedRPS:      achievedRPS,
+				ErrorCount:       errorCount,
+				IncompleteCount:  incompleteCount,
+				TTFT:             ttftJSON,
+				ITL:              itlJSON,
+				Throughput:       throughputJSON,
+				GuideLLMRaw:      guidellmRaw,
+				DurationSec:      loadDuration,
+			}
+			prefillResults = append(prefillResults, result)
+
+			GinkgoWriter.Printf("\n======================================================\n")
+			GinkgoWriter.Printf("  %s PREFILL BENCHMARK RESULTS FOR %s\n", autoscalerType, m)
+			GinkgoWriter.Printf("======================================================\n")
+			GinkgoWriter.Printf("  Duration:        %.0fs\n", loadDuration)
+			GinkgoWriter.Printf("  Max Replicas:    %d\n", maxReplicasMap[m])
+			GinkgoWriter.Printf("  Avg Replicas:    %.2f\n", replicaAvg)
+			GinkgoWriter.Printf("  Avg Queue Depth: %.2f\n", qdAvg)
+			GinkgoWriter.Printf("  Avg EPP Queue:   %.2f\n", eppQDAvg)
+			GinkgoWriter.Printf("  Avg KV Cache:    %.3f\n", kvAvg)
+			if requestTotals != nil {
+				GinkgoWriter.Printf("  Request Totals:  %s\n", string(requestTotals))
+			}
+			if ttftJSON != nil {
+				GinkgoWriter.Printf("  TTFT:            %s\n", string(ttftJSON))
+			}
+			if itlJSON != nil {
+				GinkgoWriter.Printf("  ITL:             %s\n", string(itlJSON))
+			}
+			if throughputJSON != nil {
+				GinkgoWriter.Printf("  Throughput:      %s\n", string(throughputJSON))
+			}
+			GinkgoWriter.Printf("  Replica Timeline (%d snapshots):\n", len(timelineMap[m]))
+			for _, s := range timelineMap[m] {
+				GinkgoWriter.Printf("    t=%.0fs  spec=%d  ready=%d\n", s.ElapsedSec, s.SpecReplicas, s.ReadyReplicas)
+			}
+			GinkgoWriter.Printf("======================================================\n\n")
 		}
-		if itlJSON != nil {
-			GinkgoWriter.Printf("  ITL:             %s\n", string(itlJSON))
-		}
-		if throughputJSON != nil {
-			GinkgoWriter.Printf("  Throughput:      %s\n", string(throughputJSON))
-		}
-		GinkgoWriter.Printf("  Replica Timeline (%d snapshots):\n", len(timeline))
-		for _, s := range timeline {
-			GinkgoWriter.Printf("    t=%.0fs  spec=%d  ready=%d\n", s.ElapsedSec, s.SpecReplicas, s.ReadyReplicas)
-		}
-		GinkgoWriter.Printf("========================================\n\n")
 
 		By("Saving prefill benchmark results to file")
 		data, _ := json.MarshalIndent(prefillResults, "", "  ")
@@ -800,37 +874,43 @@ var _ = Describe("Prefill Heavy Workload Benchmark", Ordered, Label("benchmark",
 	}
 
 	Context("WVA", func() {
-		It("should run the prefill heavy workload against WVA", func() {
+		It("should run the prefill heavy workload against WVA for all base models", func() {
 			cleanupAutoscalers()
-			res.DeploymentName = findInfraDecodeDeployment()
-			ensureInfraDeploymentReady()
+			deployMap := findInfraDecodeDeployments()
+			ensureInfraDeploymentsReady(deployMap)
 
-			By("Creating VariantAutoscaling resource (max=10, cost=10)")
-			err := fixtures.EnsureVariantAutoscaling(
-				ctx, crClient, benchCfg.LLMDNamespace, res.VAName, res.DeploymentName,
-				benchCfg.ModelID, benchCfg.AcceleratorType, 10.0, benchCfg.ControllerInstance,
-				fixtures.WithMinReplicas(1),
-				fixtures.WithMaxReplicas(10),
-			)
-			Expect(err).NotTo(HaveOccurred(), "Failed to create VA")
+			By("Creating VariantAutoscaling resources and HPAs for all models")
+			for _, m := range modelsList {
+				depName := deployMap[m]
+				safePostfix := strings.ReplaceAll(strings.ReplaceAll(strings.ToLower(m), "/", "-"), ".", "-")
+				vaName := res.VAName + "-" + safePostfix
+				hpaName := res.HPAName + "-" + safePostfix
 
-			By("Creating HPA (Scale Up: 0s/Pods/10/150, Scale Down: 240s/Pods/10/150)")
-			behavior := &autoscalingv2.HorizontalPodAutoscalerBehavior{
-				ScaleUp: &autoscalingv2.HPAScalingRules{
-					StabilizationWindowSeconds: ptr.To(int32(0)),
-					Policies:                   []autoscalingv2.HPAScalingPolicy{{Type: autoscalingv2.PodsScalingPolicy, Value: 10, PeriodSeconds: 150}},
-				},
-				ScaleDown: &autoscalingv2.HPAScalingRules{
-					StabilizationWindowSeconds: ptr.To(int32(240)),
-					Policies:                   []autoscalingv2.HPAScalingPolicy{{Type: autoscalingv2.PodsScalingPolicy, Value: 10, PeriodSeconds: 150}},
-				},
+				err := fixtures.EnsureVariantAutoscaling(
+					ctx, crClient, benchCfg.LLMDNamespace, vaName, depName,
+					m, benchCfg.AcceleratorType, 10.0, benchCfg.ControllerInstance,
+					fixtures.WithMinReplicas(1),
+					fixtures.WithMaxReplicas(10),
+				)
+				Expect(err).NotTo(HaveOccurred(), "Failed to create VA for "+m)
+
+				behavior := &autoscalingv2.HorizontalPodAutoscalerBehavior{
+					ScaleUp: &autoscalingv2.HPAScalingRules{
+						StabilizationWindowSeconds: ptr.To(int32(0)),
+						Policies:                   []autoscalingv2.HPAScalingPolicy{{Type: autoscalingv2.PodsScalingPolicy, Value: 10, PeriodSeconds: 150}},
+					},
+					ScaleDown: &autoscalingv2.HPAScalingRules{
+						StabilizationWindowSeconds: ptr.To(int32(240)),
+						Policies:                   []autoscalingv2.HPAScalingPolicy{{Type: autoscalingv2.PodsScalingPolicy, Value: 10, PeriodSeconds: 150}},
+					},
+				}
+				err = fixtures.EnsureHPA(ctx, k8sClient, benchCfg.LLMDNamespace, hpaName, depName, vaName, 1, 10, WithBehavior(behavior))
+				Expect(err).NotTo(HaveOccurred(), "Failed to create HPA for "+m)
 			}
-			err = fixtures.EnsureHPA(ctx, k8sClient, benchCfg.LLMDNamespace, res.HPAName, res.DeploymentName, res.VAName, 1, 10, WithBehavior(behavior))
-			Expect(err).NotTo(HaveOccurred(), "Failed to create HPA")
 
-			waitForVAAndMetrics()
+			waitForVAsAndMetrics()
 
-			runPrefillBenchmark("WVA")
+			runPrefillBenchmark("WVA", deployMap)
 		})
 	})
 
