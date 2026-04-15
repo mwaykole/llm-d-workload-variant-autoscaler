@@ -310,6 +310,31 @@ deploy_llm_d_infrastructure() {
                 log_info "Skipping image patch: llm-d-inference-scheduler already using $LLM_D_INFERENCE_SCHEDULER_IMG"
             fi
 
+            # Align EPP --pool-group with the GA InferencePool API group.
+            # The inferencepool Helm chart v1.4.0 creates InferencePool in
+            # inference.networking.k8s.io/v1, but the llm-d-inference-scheduler
+            # image defaults --pool-group to inference.networking.x-k8s.io.
+            local TARGET_POOL_GROUP="inference.networking.k8s.io"
+            if kubectl get deployment "$LLM_D_EPP_NAME" -n "$LLMD_NS" -o json \
+                | jq -e --arg group "$TARGET_POOL_GROUP" \
+                    '.spec.template.spec.containers[0].args | any(. == $group)' &>/dev/null; then
+                log_info "EPP --pool-group already set to $TARGET_POOL_GROUP"
+            else
+                log_info "Patching EPP --pool-group to $TARGET_POOL_GROUP (GA InferencePool API)"
+                local NEW_ARGS
+                NEW_ARGS=$(kubectl get deployment "$LLM_D_EPP_NAME" -n "$LLMD_NS" -o json \
+                    | jq -c --arg group "$TARGET_POOL_GROUP" '
+                        .spec.template.spec.containers[0].args as $a |
+                        [range(0; $a | length) | . as $i | $a[$i] |
+                         select(. != "--pool-group") |
+                         select($i == 0 or $a[$i - 1] != "--pool-group") |
+                         select(startswith("--pool-group=") | not)
+                        ] + ["--pool-group", $group]')
+                kubectl patch deployment "$LLM_D_EPP_NAME" -n "$LLMD_NS" --type='json' \
+                    -p="[{\"op\": \"replace\", \"path\": \"/spec/template/spec/containers/0/args\", \"value\": $NEW_ARGS}]"
+                log_success "EPP --pool-group patched to $TARGET_POOL_GROUP"
+            fi
+
             # Enable flowControl feature gate in the EPP ConfigMap
             if kubectl get configmap "$LLM_D_EPP_NAME" -n "$LLMD_NS" &> /dev/null; then
                 # Check if flowControl is already enabled
