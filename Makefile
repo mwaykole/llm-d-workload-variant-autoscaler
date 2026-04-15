@@ -221,7 +221,7 @@ deploy-e2e-infra: ## Deploy e2e test infrastructure (infra-only: WVA + llm-d, no
 .PHONY: deploy-e2e-infra-multi-model
 deploy-e2e-infra-multi-model: ## Deploy e2e test infrastructure with two concurrent model services
 	@echo "Deploying multi-model e2e test infrastructure..."
-	./deploy/install-multi-model.sh
+	go run ./deploy/multimodel
 
 # Configurable multi-model deployment for any environment.
 # Usage:
@@ -259,7 +259,7 @@ deploy-multi-model-infra: ## Deploy multi-model infra with N models. Set MODELS=
 	WVA_IMAGE_TAG="$$IMAGE_TAG" \
 	WVA_IMAGE_PULL_POLICY=IfNotPresent \
 	MODELS="$(MODELS)" \
-	./deploy/install-multi-model.sh
+	go run ./deploy/multimodel
 
 # Undeploy multi-model infrastructure.
 # Must use the same MODELS list that was used during deployment.
@@ -272,7 +272,7 @@ undeploy-multi-model-infra: ## Undeploy multi-model infra. Use same MODELS=m1,m2
 	NAMESPACE_SCOPED=$(NAMESPACE_SCOPED) \
 	DELETE_NAMESPACES=$(DELETE_NAMESPACES) \
 	MODELS="$(MODELS)" \
-	./deploy/install-multi-model.sh --undeploy
+	go run ./deploy/multimodel -- --undeploy
 
 # Multi-model scaling test parameters
 MM_MIN_REPLICAS ?= 1
@@ -418,7 +418,6 @@ lint: golangci-lint ## Run golangci-lint linter
 lint-deploy-scripts: ## Run bash -n for deploy/install.sh, deploy/lib/*.sh, and deploy plugins
 	@echo "Syntax-checking deploy shell scripts..."
 	@bash -n deploy/install.sh
-	@bash -n deploy/install-multi-model.sh
 	@for script in deploy/lib/*.sh; do bash -n "$$script"; done
 	@for script in deploy/*/install.sh; do if [ -f "$$script" ]; then bash -n "$$script"; fi; done
 	@for script in deploy/kind-emulator/*.sh; do if [ -f "$$script" ]; then bash -n "$$script"; fi; done
