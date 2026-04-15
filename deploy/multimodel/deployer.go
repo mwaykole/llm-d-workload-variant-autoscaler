@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"strconv"
 	"strings"
 	"sync"
 
@@ -25,7 +26,7 @@ type Deployer struct {
 func (d *Deployer) Deploy(ctx context.Context) error {
 	totalSteps := len(d.cfg.Models) + 3 // N models + Gateway + HTTPRoute + Verify
 
-	logInfo("Models to deploy (" + fmt.Sprintf("%d", len(d.cfg.Models)) + "): " + modelNames(d.cfg.Models))
+	logInfo("Models to deploy (" + strconv.Itoa(len(d.cfg.Models)) + "): " + modelNames(d.cfg.Models))
 	logInfo("Resource slugs: " + modelSlugs(d.cfg.Models))
 
 	// Step 1: Deploy first model with full control plane

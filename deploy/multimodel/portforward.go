@@ -27,7 +27,7 @@ func newPortForwarder(_ *kubernetes.Clientset, namespace, serviceName string, re
 
 	cmd := exec.Command("kubectl", "port-forward",
 		"-n", namespace,
-		fmt.Sprintf("svc/%s", serviceName),
+		"svc/"+serviceName,
 		fmt.Sprintf("%d:%d", localPort, remotePort),
 	)
 
@@ -84,4 +84,3 @@ func httpGetStatus(url string) int {
 	defer resp.Body.Close()
 	return resp.StatusCode
 }
-
