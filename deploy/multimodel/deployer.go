@@ -148,7 +148,7 @@ func (d *Deployer) Undeploy(ctx context.Context) error {
 	env := d.buildBaseEnv()
 	env = append(env,
 		"RELEASE_NAME_POSTFIX="+d.cfg.Models[0].Slug,
-		"INSTALL_GATEWAY_CTRLPLANE=true",
+		"INSTALL_GATEWAY_CTRLPLANE="+envDefault("INSTALL_GATEWAY_CTRLPLANE", "true"),
 		"DEPLOY_WVA=true",
 		"DEPLOY_PROMETHEUS=true",
 		"DEPLOY_LLM_D=false",
@@ -179,10 +179,10 @@ func (d *Deployer) runInstallScript(model ModelInfo, fullStack bool) error {
 
 	if fullStack {
 		env = append(env,
-			"INSTALL_GATEWAY_CTRLPLANE=true",
+			"INSTALL_GATEWAY_CTRLPLANE="+envDefault("INSTALL_GATEWAY_CTRLPLANE", "false"),
 			"DEPLOY_WVA=true",
 			"DEPLOY_PROMETHEUS=true",
-			"E2E_TESTS_ENABLED=false",
+			"E2E_TESTS_ENABLED=true",
 		)
 	} else {
 		env = append(env,

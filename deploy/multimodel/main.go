@@ -85,13 +85,13 @@ type Config struct {
 	DeployScript   string
 	Undeploy       bool
 	// Passthrough env vars for install.sh
-	WVAImageRepo      string
-	WVAImageTag       string
+	WVAImageRepo       string
+	WVAImageTag        string
 	WVAImagePullPolicy string
-	NamespaceScoped   string
-	LLMDRelease       string
-	DeleteNamespaces  string
-	WVANamespace      string
+	NamespaceScoped    string
+	LLMDRelease        string
+	DeleteNamespaces   string
+	WVANamespace       string
 }
 
 // ModelInfo groups a HuggingFace model ID with its DNS-safe slug.

@@ -93,10 +93,15 @@ deploy_llm_d_infrastructure() {
     # The chart sets a default (e.g. "Qwen3-32B") that all deployments share,
     # which causes AmbiguousSelector errors when multiple HPAs target different
     # deployments with identical pod selectors.
+    # Only set if the values file already has a labels key (chart schema may reject it).
     local model_label_value
     model_label_value=$(echo "$MODEL_ID" | sed 's|.*/||; s|\.|-|g')  # e.g. "Qwen3-0-6B", "Meta-Llama-3.1-8B"
-    log_info "Setting llm-d.ai/model label to: $model_label_value (unique per model)"
-    yq eval ".modelArtifacts.labels.\"llm-d.ai/model\" = \"$model_label_value\"" -i "$LLM_D_MODELSERVICE_VALUES"
+    if yq eval '.modelArtifacts | has("labels")' "$LLM_D_MODELSERVICE_VALUES" 2>/dev/null | grep -q "true"; then
+        log_info "Setting llm-d.ai/model label to: $model_label_value (unique per model)"
+        yq eval ".modelArtifacts.labels.\"llm-d.ai/model\" = \"$model_label_value\"" -i "$LLM_D_MODELSERVICE_VALUES"
+    else
+        log_info "Chart does not support modelArtifacts.labels, skipping label override"
+    fi
     # Configure llm-d-inference-simulator if needed
     if [ "$DEPLOY_LLM_D_INFERENCE_SIM" == "true" ]; then
       log_info "Deploying llm-d-inference-simulator..."

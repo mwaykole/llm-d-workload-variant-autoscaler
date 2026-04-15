@@ -35,8 +35,9 @@ DELETE_CLUSTER ?= false
 DELETE_NAMESPACES ?= false
 
 # Multi-model deployment configuration (used by deploy-multi-model-infra)
-MODELS           ?= Qwen/Qwen3-0.6B,unsloth/Meta-Llama-3.1-8B
-NAMESPACE_SCOPED ?= false
+MODELS                    ?= Qwen/Qwen3-0.6B,unsloth/Meta-Llama-3.1-8B
+NAMESPACE_SCOPED          ?= false
+INSTALL_GATEWAY_CTRLPLANE ?= false
 
 # Get the currently used golang install path (in GOPATH/bin, unless GOBIN is set)
 ifeq (,$(shell go env GOBIN))
@@ -253,6 +254,7 @@ deploy-multi-model-infra: ## Deploy multi-model infra with N models. Set MODELS=
 	WVA_NS="$(WVA_NS)" \
 	LLMD_NS="$(LLMD_NS)" \
 	NAMESPACE_SCOPED=$(NAMESPACE_SCOPED) \
+	INSTALL_GATEWAY_CTRLPLANE=$(INSTALL_GATEWAY_CTRLPLANE) \
 	DECODE_REPLICAS=$(DECODE_REPLICAS) \
 	LLM_D_RELEASE=$(LLM_D_RELEASE) \
 	WVA_IMAGE_REPO="$$IMAGE_REPO" \
