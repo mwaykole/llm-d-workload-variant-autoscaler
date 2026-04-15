@@ -187,7 +187,7 @@ func httpRouteGVR() schema.GroupVersionResource {
 
 // detectInferencePoolAPIGroup checks which InferencePool CRD is installed,
 // preferring the GA version.
-func detectInferencePoolAPIGroup(ctx context.Context, clientset *kubernetes.Clientset) string {
+func detectInferencePoolAPIGroup(clientset *kubernetes.Clientset) string {
 	_, err := clientset.Discovery().ServerResourcesForGroupVersion("inference.networking.k8s.io/v1")
 	if err == nil {
 		return "inference.networking.k8s.io"

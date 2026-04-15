@@ -6,7 +6,6 @@ import (
 	"net"
 	"net/http"
 	"os/exec"
-	"strconv"
 	"time"
 
 	"k8s.io/client-go/kubernetes"
@@ -86,7 +85,3 @@ func httpGetStatus(url string) int {
 	return resp.StatusCode
 }
 
-// portStr returns the local port as a string (useful for constructing URLs).
-func (pf *portForwarder) portStr() string {
-	return strconv.Itoa(pf.localPort)
-}

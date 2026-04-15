@@ -25,11 +25,11 @@ type Deployer struct {
 func (d *Deployer) Deploy(ctx context.Context) error {
 	totalSteps := len(d.cfg.Models) + 3 // N models + Gateway + HTTPRoute + Verify
 
-	logInfo(fmt.Sprintf("Models to deploy (%d): %s", len(d.cfg.Models), modelNames(d.cfg.Models)))
-	logInfo(fmt.Sprintf("Resource slugs: %s", modelSlugs(d.cfg.Models)))
+	logInfo("Models to deploy (" + fmt.Sprintf("%d", len(d.cfg.Models)) + "): " + modelNames(d.cfg.Models))
+	logInfo("Resource slugs: " + modelSlugs(d.cfg.Models))
 
 	// Step 1: Deploy first model with full control plane
-	logStep(1, totalSteps, fmt.Sprintf("Full stack + %s", d.cfg.Models[0].Slug))
+	logStep(1, totalSteps, "Full stack + "+d.cfg.Models[0].Slug)
 	if err := d.runInstallScript(d.cfg.Models[0], true); err != nil {
 		return fmt.Errorf("deploy first model %s: %w", d.cfg.Models[0].ModelID, err)
 	}
@@ -82,9 +82,7 @@ func (d *Deployer) Deploy(ctx context.Context) error {
 	// Verify InferencePools
 	poolStep := len(d.cfg.Models) + 1
 	logStep(poolStep, totalSteps, "Verifying InferencePool resources")
-	if err := d.verifyInferencePools(ctx); err != nil {
-		logWarning(fmt.Sprintf("InferencePool verification: %v", err))
-	}
+	d.verifyInferencePools(ctx)
 
 	// Deploy HTTPRoute with URLRewrite rules
 	routeStep := len(d.cfg.Models) + 2
@@ -108,7 +106,7 @@ func (d *Deployer) Deploy(ctx context.Context) error {
 // Undeploy tears down all multi-model resources.
 func (d *Deployer) Undeploy(ctx context.Context) error {
 	logInfo("Starting Multi-Model Undeployment")
-	logInfo(fmt.Sprintf("Models: %s", modelNames(d.cfg.Models)))
+	logInfo("Models: " + modelNames(d.cfg.Models))
 
 	// Delete HTTPRoute
 	logInfo("Deleting multi-model HTTPRoute...")
@@ -122,7 +120,7 @@ func (d *Deployer) Undeploy(ctx context.Context) error {
 
 	// Delete InferencePools
 	logInfo("Deleting InferencePool resources...")
-	poolAPIGroup := detectInferencePoolAPIGroup(ctx, d.clientset)
+	poolAPIGroup := detectInferencePoolAPIGroup(d.clientset)
 	for _, m := range d.cfg.Models {
 		poolName := "gaie-" + m.Slug
 		_ = d.dynClient.Resource(inferencePoolGVR(poolAPIGroup)).Namespace(d.cfg.Namespace).Delete(ctx, poolName, metav1.DeleteOptions{})
@@ -283,9 +281,9 @@ func (d *Deployer) deleteModelGateway(ctx context.Context, slug string) {
 }
 
 // verifyInferencePools checks that each model's InferencePool exists.
-func (d *Deployer) verifyInferencePools(ctx context.Context) error {
-	poolAPIGroup := detectInferencePoolAPIGroup(ctx, d.clientset)
-	logInfo(fmt.Sprintf("Detected InferencePool API group: %s", poolAPIGroup))
+func (d *Deployer) verifyInferencePools(ctx context.Context) {
+	poolAPIGroup := detectInferencePoolAPIGroup(d.clientset)
+	logInfo("Detected InferencePool API group: " + poolAPIGroup)
 
 	for _, m := range d.cfg.Models {
 		poolName := "gaie-" + m.Slug
@@ -293,17 +291,16 @@ func (d *Deployer) verifyInferencePools(ctx context.Context) error {
 		if err != nil {
 			logWarning(fmt.Sprintf("InferencePool %s not found — it should have been created by the gaie-%s Helm release", poolName, m.Slug))
 		} else {
-			logSuccess(fmt.Sprintf("InferencePool %s exists", poolName))
+			logSuccess("InferencePool " + poolName + " exists")
 		}
 	}
-	return nil
 }
 
 // createHTTPRoute creates the shared HTTPRoute with one URLRewrite rule per model.
 func (d *Deployer) createHTTPRoute(ctx context.Context) error {
-	poolAPIGroup := detectInferencePoolAPIGroup(ctx, d.clientset)
+	poolAPIGroup := detectInferencePoolAPIGroup(d.clientset)
 
-	var rules []interface{}
+	rules := make([]interface{}, 0, len(d.cfg.Models))
 	for _, m := range d.cfg.Models {
 		rule := map[string]interface{}{
 			"matches": []interface{}{
