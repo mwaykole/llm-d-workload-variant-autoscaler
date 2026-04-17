@@ -392,6 +392,27 @@ test-benchmark: manifests generate fmt vet ## Run benchmark tests (scale-up-late
 .PHONY: test-benchmark-with-setup
 test-benchmark-with-setup: deploy-e2e-infra test-benchmark
 
+.PHONY: test-benchmark-sharegpt
+test-benchmark-sharegpt: manifests generate fmt vet ## Run ShareGPT single-model benchmark (real-world decode-heavy workload)
+	@echo "Running ShareGPT benchmark..."
+	KUBECONFIG=$(KUBECONFIG) \
+	ENVIRONMENT=$(ENVIRONMENT) \
+	WVA_NAMESPACE=$(CONTROLLER_NAMESPACE) \
+	LLMD_NAMESPACE=$(LLMD_NS) \
+	MONITORING_NAMESPACE=$(E2E_MONITORING_NAMESPACE) \
+	USE_SIMULATOR=$(USE_SIMULATOR) \
+	SCALER_BACKEND=$(SCALER_BACKEND) \
+	MODEL_ID=$(MODEL_ID) \
+	PROMETHEUS_TOKEN=$$(oc whoami -t 2>/dev/null || echo "") \
+	go test ./test/benchmark/ -timeout 75m -v -ginkgo.v \
+		-ginkgo.label-filter="sharegpt"; \
+	TEST_EXIT_CODE=$$?; \
+	echo ""; \
+	echo "=========================================="; \
+	echo "ShareGPT benchmark completed. Exit code: $$TEST_EXIT_CODE"; \
+	echo "=========================================="; \
+	exit $$TEST_EXIT_CODE
+
 # Stub for llm-d nightly reusable workflows (test_target=nightly-test-llm-d)
 # No-op; temporarily satisfies nightly CI make invocation
 # TODO: add nightly guide tests here

@@ -1,0 +1,41 @@
+# ShareGPT Single-Model Benchmark Configuration
+#
+# This config drives GuideLLM with real-world conversational data from the
+# ShareGPT dataset (hosted on HuggingFace). The dataset contains variable-length
+# prompts and completions, producing a more balanced (decode-heavy) workload
+# compared to the synthetic prefill-heavy benchmark.
+#
+# Override any field via environment variables — see the field comments.
+
+benchmark:
+  # GuideLLM image to use
+  image: "ghcr.io/vllm-project/guidellm:v0.5.4"
+
+  # Dataset source — the same dataset used by vLLM's official benchmark suite.
+  # If the value starts with http:// or https://, the job will download it
+  # to a local path before passing it to GuideLLM's --data flag.
+  dataset: "https://huggingface.co/datasets/anon8231489123/ShareGPT_Vicuna_unfiltered/resolve/main/ShareGPT_V3_unfiltered_cleaned_split.json"
+
+  # GuideLLM request type — use text_completions since the simulator's base
+  # model has no chat template (chat_completions returns 400).
+  request_type: "text_completions"
+
+  # Load profile: "poisson", "constant", "throughput", "synchronous"
+  profile: "poisson"
+
+  # Target requests per second (for poisson/constant profiles)
+  rate: 10
+
+  # Maximum benchmark duration in seconds
+  max_seconds: 600
+
+  # Random seed for reproducibility
+  random_seed: 42
+
+  # Output path inside the container
+  output_path: "/tmp/benchmarks.json"
+
+  # Resource requests for the GuideLLM job pod
+  resources:
+    cpu: "2"
+    memory: "4Gi"
