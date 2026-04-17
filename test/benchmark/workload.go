@@ -165,7 +165,7 @@ func CreateGuideLLMShareGPTJob(
 	dataArg := spec.Dataset
 	downloadCmd := ""
 	localDataPath := "/tmp/sharegpt_data.json"
-	convertedPath := "/tmp/sharegpt_prompts.json"
+	convertedPath := "/tmp/sharegpt_prompts.jsonl"
 	if strings.HasPrefix(spec.Dataset, "http://") || strings.HasPrefix(spec.Dataset, "https://") {
 		pyScript := "/tmp/convert_sharegpt.py"
 		writeScript := fmt.Sprintf(
@@ -174,16 +174,16 @@ import json, urllib.request, sys
 urllib.request.urlretrieve(sys.argv[1], sys.argv[2])
 with open(sys.argv[2]) as f:
     data = json.load(f)
-prompts = []
-for item in data:
-    convs = item.get('conversations', [])
-    for turn in convs:
-        if turn.get('from') == 'human' and turn.get('value', '').strip():
-            prompts.append({'prompt': turn['value'].strip()})
-            break
+count = 0
 with open(sys.argv[3], 'w') as f:
-    json.dump(prompts, f)
-print(f'Converted {len(prompts)} prompts')
+    for item in data:
+        convs = item.get('conversations', [])
+        for turn in convs:
+            if turn.get('from') == 'human' and turn.get('value', '').strip():
+                f.write(json.dumps({'prompt': turn['value'].strip()}) + '\n')
+                count += 1
+                break
+print(f'Converted {count} prompts to JSONL')
 PYEOF`, pyScript)
 		downloadCmd = fmt.Sprintf(
 			"echo 'Downloading and converting ShareGPT dataset...' && %s\npython3 %s %s %s %s && ",
