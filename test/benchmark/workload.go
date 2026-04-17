@@ -140,6 +140,9 @@ func LoadShareGPTConfig(path string) (*ShareGPTBenchmarkConfig, error) {
 	if v := os.Getenv("SHAREGPT_DATASET"); v != "" {
 		cfg.Benchmark.Dataset = v
 	}
+	if v := os.Getenv("SHAREGPT_REQUEST_TYPE"); v != "" {
+		cfg.Benchmark.RequestType = v
+	}
 	if v := os.Getenv("SHAREGPT_RATE"); v != "" {
 		fmt.Sscanf(v, "%d", &cfg.Benchmark.Rate)
 	}

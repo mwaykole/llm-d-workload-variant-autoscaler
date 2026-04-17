@@ -16,9 +16,9 @@ benchmark:
   # to a local path before passing it to GuideLLM's --data flag.
   dataset: "https://huggingface.co/datasets/anon8231489123/ShareGPT_Vicuna_unfiltered/resolve/main/ShareGPT_V3_unfiltered_cleaned_split.json"
 
-  # GuideLLM request type — use text_completions since the simulator's base
-  # model has no chat template (chat_completions returns 400).
-  request_type: "text_completions"
+  # GuideLLM request type — chat_completions for real vLLM (model has a chat
+  # template). Override with SHAREGPT_REQUEST_TYPE=text_completions for simulators.
+  request_type: "chat_completions"
 
   # Load profile: "poisson", "constant", "throughput", "synchronous"
   profile: "poisson"

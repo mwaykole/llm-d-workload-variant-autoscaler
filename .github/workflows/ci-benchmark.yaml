@@ -640,8 +640,19 @@ jobs:
           TEST_EXIT=0
           make test-benchmark || TEST_EXIT=$?
 
+          echo ""
+          echo "============================================"
+          echo "Running ShareGPT decode-heavy benchmark..."
+          echo "============================================"
+          SHAREGPT_EXIT=0
+          make test-benchmark-sharegpt || SHAREGPT_EXIT=$?
+
           kill $GUARD_PID 2>/dev/null || true
-          exit $TEST_EXIT
+
+          if [ $TEST_EXIT -ne 0 ]; then
+            exit $TEST_EXIT
+          fi
+          exit $SHAREGPT_EXIT
 
       - name: Generate benchmark plots
         if: always()
@@ -983,6 +994,7 @@ jobs:
           path: |
             /tmp/benchmark-results.json
             /tmp/prefill-benchmark-results.json
+            /tmp/sharegpt-benchmark-results.json
             /tmp/benchmark-grafana-snapshot.txt
             /tmp/benchmark-grafana-snapshot.json
             /tmp/benchmark-panels/
