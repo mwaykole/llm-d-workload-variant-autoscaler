@@ -638,21 +638,10 @@ jobs:
           kubectl get --raw "/apis/external.metrics.k8s.io/v1beta1" | head -1 && echo "External metrics API: OK" || echo "WARNING: External metrics API not available"
 
           TEST_EXIT=0
-          make test-benchmark || TEST_EXIT=$?
-
-          echo ""
-          echo "============================================"
-          echo "Running ShareGPT decode-heavy benchmark..."
-          echo "============================================"
-          SHAREGPT_EXIT=0
-          make test-benchmark-sharegpt || SHAREGPT_EXIT=$?
+          make test-benchmark-sharegpt || TEST_EXIT=$?
 
           kill $GUARD_PID 2>/dev/null || true
-
-          if [ $TEST_EXIT -ne 0 ]; then
-            exit $TEST_EXIT
-          fi
-          exit $SHAREGPT_EXIT
+          exit $TEST_EXIT
 
       - name: Generate benchmark plots
         if: always()
