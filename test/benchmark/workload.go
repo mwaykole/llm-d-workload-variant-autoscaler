@@ -22,12 +22,17 @@ import (
 type WorkloadScenario struct {
 	Name         string `json:"name" yaml:"name"`
 	Description  string `json:"description,omitempty" yaml:"description,omitempty"`
-	PromptTokens int    `json:"promptTokens" yaml:"promptTokens"`
-	OutputTokens int    `json:"outputTokens" yaml:"outputTokens"`
+	PromptTokens int    `json:"promptTokens,omitempty" yaml:"promptTokens,omitempty"`
+	OutputTokens int    `json:"outputTokens,omitempty" yaml:"outputTokens,omitempty"`
 	Rate         int    `json:"rate" yaml:"rate"`
 	MaxSeconds   int    `json:"maxSeconds" yaml:"maxSeconds"`
 	Profile      string `json:"profile" yaml:"profile"`
 	RequestType  string `json:"requestType" yaml:"requestType"`
+	// Dataset is an optional URL to a real dataset (e.g. ShareGPT JSON from HuggingFace).
+	// When set, the job downloads the file, converts it to JSONL (one prompt per line),
+	// and passes the JSONL path as GuideLLM's --data argument instead of synthetic data.
+	Dataset   string `json:"dataset,omitempty" yaml:"dataset,omitempty"`
+	MaxTokens int    `json:"maxTokens,omitempty" yaml:"maxTokens,omitempty"`
 }
 
 // scenariosDir returns the absolute path to the scenarios/ directory relative to this source file.
@@ -74,6 +79,8 @@ func LoadScenario(name string) WorkloadScenario {
 }
 
 // CreateGuideLLMJobWithArgs launches a GuideLLM Job with parameters from the given WorkloadScenario.
+// When scenario.Dataset is set (a URL), the job downloads and converts the dataset
+// to JSONL before running GuideLLM. Otherwise it uses synthetic prompt_tokens/output_tokens.
 func CreateGuideLLMJobWithArgs(
 	ctx context.Context,
 	k8sClient *kubernetes.Clientset,
@@ -81,8 +88,48 @@ func CreateGuideLLMJobWithArgs(
 	scenario WorkloadScenario,
 ) error {
 	image := "ghcr.io/vllm-project/guidellm:v0.5.4"
+	outputPath := "/tmp/benchmarks.json"
 
-	dataArg := "prompt_tokens=" + strconv.Itoa(scenario.PromptTokens) + ",output_tokens=" + strconv.Itoa(scenario.OutputTokens)
+	var dataArg, preamble string
+	cpuReq := "1"
+	memReq := "1Gi"
+
+	if scenario.Dataset != "" {
+		// Real dataset mode: download JSON, convert to JSONL with output_tokens_count
+		cpuReq = "2"
+		memReq = "4Gi"
+		maxTok := scenario.MaxTokens
+		if maxTok <= 0 {
+			maxTok = 1024
+		}
+		convertedPath := "/tmp/dataset.jsonl"
+		pyScript := "/tmp/convert_dataset.py"
+		preamble = fmt.Sprintf(
+			`cat > %s << 'PYEOF'
+import json, urllib.request, sys
+max_tokens = int(sys.argv[4])
+urllib.request.urlretrieve(sys.argv[1], sys.argv[2])
+with open(sys.argv[2]) as f:
+    data = json.load(f)
+count = 0
+with open(sys.argv[3], 'w') as out:
+    for item in data:
+        convs = item.get('conversations', [])
+        for turn in convs:
+            if turn.get('from') == 'human' and turn.get('value', '').strip():
+                rec = {'prompt': turn['value'].strip(), 'output_tokens_count': max_tokens}
+                out.write(json.dumps(rec) + '\n')
+                count += 1
+                break
+print(f'Converted {count} prompts to JSONL (output_tokens_count={max_tokens})')
+PYEOF
+echo 'Downloading and converting dataset...' && python3 %s %s /tmp/raw_dataset.json %s %d && `,
+			pyScript, pyScript, scenario.Dataset, convertedPath, maxTok,
+		)
+		dataArg = convertedPath
+	} else {
+		dataArg = "prompt_tokens=" + strconv.Itoa(scenario.PromptTokens) + ",output_tokens=" + strconv.Itoa(scenario.OutputTokens)
+	}
 
 	args := []string{
 		"benchmark",
@@ -94,9 +141,14 @@ func CreateGuideLLMJobWithArgs(
 		"--random-seed", "42",
 		"--request-type", scenario.RequestType,
 		"--data", dataArg,
-		"--output-path", "/tmp/benchmarks.json",
+		"--output-path", outputPath,
 		"--backend-kwargs", `'{"validate_backend": false}'`,
 	}
+
+	shellScript := fmt.Sprintf(
+		"echo 'Waiting 30s for gateway routing to propagate...' && sleep 30 && %sguidellm %s && echo '=== BENCHMARK JSON ===' && cat %s",
+		preamble, strings.Join(args, " "), outputPath,
+	)
 
 	job := &batchv1.Job{
 		ObjectMeta: metav1.ObjectMeta{
@@ -124,9 +176,7 @@ func CreateGuideLLMJobWithArgs(
 							Image:           image,
 							ImagePullPolicy: corev1.PullIfNotPresent,
 							Command:         []string{"sh", "-c"},
-							Args: []string{
-								fmt.Sprintf("echo 'Waiting 30s for gateway routing to propagate...' && sleep 30 && guidellm %s && echo '=== BENCHMARK JSON ===' && cat /tmp/benchmarks.json", strings.Join(args, " ")),
-							},
+							Args:            []string{shellScript},
 							Env: []corev1.EnvVar{
 								{Name: "HF_HOME", Value: "/tmp"},
 								{
@@ -142,8 +192,8 @@ func CreateGuideLLMJobWithArgs(
 							},
 							Resources: corev1.ResourceRequirements{
 								Requests: corev1.ResourceList{
-									corev1.ResourceCPU:    resource.MustParse("1"),
-									corev1.ResourceMemory: resource.MustParse("1Gi"),
+									corev1.ResourceCPU:    resource.MustParse(cpuReq),
+									corev1.ResourceMemory: resource.MustParse(memReq),
 								},
 							},
 						},
