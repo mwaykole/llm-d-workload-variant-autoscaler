@@ -2,7 +2,7 @@ name: "ShareGPT"
 description: "Real-world decode-heavy workload using ShareGPT conversational dataset from HuggingFace"
 dataset: "https://huggingface.co/datasets/anon8231489123/ShareGPT_Vicuna_unfiltered/resolve/main/ShareGPT_V3_unfiltered_cleaned_split.json"
 maxTokens: 1024
-rate: 10
+rate: 20
 maxSeconds: 600
 profile: "poisson"
 requestType: "text_completions"
