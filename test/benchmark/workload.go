@@ -172,9 +172,14 @@ func CreateGuideLLMShareGPTJob(
 	convertedPath := "/tmp/sharegpt_prompts.jsonl"
 	if strings.HasPrefix(spec.Dataset, "http://") || strings.HasPrefix(spec.Dataset, "https://") {
 		pyScript := "/tmp/convert_sharegpt.py"
+		maxTok := spec.MaxTokens
+		if maxTok <= 0 {
+			maxTok = 16
+		}
 		writeScript := fmt.Sprintf(
 			`cat > %s << 'PYEOF'
 import json, urllib.request, sys
+max_tokens = int(sys.argv[4])
 urllib.request.urlretrieve(sys.argv[1], sys.argv[2])
 with open(sys.argv[2]) as f:
     data = json.load(f)
@@ -184,14 +189,15 @@ with open(sys.argv[3], 'w') as f:
         convs = item.get('conversations', [])
         for turn in convs:
             if turn.get('from') == 'human' and turn.get('value', '').strip():
-                f.write(json.dumps({'prompt': turn['value'].strip()}) + '\n')
+                rec = {'prompt': turn['value'].strip(), 'output_tokens_count': max_tokens}
+                f.write(json.dumps(rec) + '\n')
                 count += 1
                 break
-print(f'Converted {count} prompts to JSONL')
+print(f'Converted {count} prompts to JSONL (output_tokens_count={max_tokens})')
 PYEOF`, pyScript)
 		downloadCmd = fmt.Sprintf(
-			"echo 'Downloading and converting ShareGPT dataset...' && %s\npython3 %s %s %s %s && ",
-			writeScript, pyScript, spec.Dataset, localDataPath, convertedPath,
+			"echo 'Downloading and converting ShareGPT dataset...' && %s\npython3 %s %s %s %s %d && ",
+			writeScript, pyScript, spec.Dataset, localDataPath, convertedPath, maxTok,
 		)
 		dataArg = convertedPath
 	}
@@ -208,11 +214,7 @@ PYEOF`, pyScript)
 		"--data", dataArg,
 		"--output-path", spec.OutputPath,
 	}
-	backendKwargs := `'{"validate_backend": false}'`
-	if spec.MaxTokens > 0 {
-		backendKwargs = fmt.Sprintf(`'{"validate_backend": false, "max_tokens": %d}'`, spec.MaxTokens)
-	}
-	args = append(args, "--backend-kwargs", backendKwargs)
+	args = append(args, "--backend-kwargs", `'{"validate_backend": false}'`)
 
 	cpuReq := spec.Resources.CPU
 	if cpuReq == "" {
