@@ -207,11 +207,12 @@ PYEOF`, pyScript)
 		"--request-type", spec.RequestType,
 		"--data", dataArg,
 		"--output-path", spec.OutputPath,
-		"--backend-kwargs", `'{"validate_backend": false}'`,
 	}
+	backendKwargs := `'{"validate_backend": false}'`
 	if spec.MaxTokens > 0 {
-		args = append(args, "--max-tokens", fmt.Sprintf("%d", spec.MaxTokens))
+		backendKwargs = fmt.Sprintf(`'{"validate_backend": false, "max_tokens": %d}'`, spec.MaxTokens)
 	}
+	args = append(args, "--backend-kwargs", backendKwargs)
 
 	cpuReq := spec.Resources.CPU
 	if cpuReq == "" {
