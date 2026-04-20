@@ -112,6 +112,7 @@ type ShareGPTBenchmarkSpec struct {
 	RequestType string                   `json:"request_type"`
 	Profile     string                   `json:"profile"`
 	Rate        int                      `json:"rate"`
+	MaxTokens   int                      `json:"max_tokens"`
 	MaxSeconds  int                      `json:"max_seconds"`
 	RandomSeed  int                      `json:"random_seed"`
 	OutputPath  string                   `json:"output_path"`
@@ -125,7 +126,7 @@ type ShareGPTResourceRequests struct {
 }
 
 // LoadShareGPTConfig reads and parses a ShareGPT benchmark YAML config file.
-// Environment variable overrides: SHAREGPT_DATASET, SHAREGPT_RATE, SHAREGPT_MAX_SECONDS.
+// Environment variable overrides: SHAREGPT_DATASET, SHAREGPT_RATE, SHAREGPT_MAX_TOKENS, SHAREGPT_MAX_SECONDS.
 func LoadShareGPTConfig(path string) (*ShareGPTBenchmarkConfig, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
@@ -145,6 +146,9 @@ func LoadShareGPTConfig(path string) (*ShareGPTBenchmarkConfig, error) {
 	}
 	if v := os.Getenv("SHAREGPT_RATE"); v != "" {
 		fmt.Sscanf(v, "%d", &cfg.Benchmark.Rate)
+	}
+	if v := os.Getenv("SHAREGPT_MAX_TOKENS"); v != "" {
+		fmt.Sscanf(v, "%d", &cfg.Benchmark.MaxTokens)
 	}
 	if v := os.Getenv("SHAREGPT_MAX_SECONDS"); v != "" {
 		fmt.Sscanf(v, "%d", &cfg.Benchmark.MaxSeconds)
@@ -204,6 +208,9 @@ PYEOF`, pyScript)
 		"--data", dataArg,
 		"--output-path", spec.OutputPath,
 		"--backend-kwargs", `'{"validate_backend": false}'`,
+	}
+	if spec.MaxTokens > 0 {
+		args = append(args, "--max-tokens", fmt.Sprintf("%d", spec.MaxTokens))
 	}
 
 	cpuReq := spec.Resources.CPU

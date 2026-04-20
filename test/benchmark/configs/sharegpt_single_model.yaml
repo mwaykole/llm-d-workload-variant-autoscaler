@@ -27,6 +27,11 @@ benchmark:
   # Target requests per second (for poisson/constant profiles)
   rate: 10
 
+  # Maximum output tokens per request. GuideLLM defaults to 16 if unset,
+  # which severely limits decode work. Set to 1024 to match how research
+  # benchmarks (e.g., PolyServe, vLLM) use the ShareGPT dataset.
+  max_tokens: 1024
+
   # Maximum benchmark duration in seconds
   max_seconds: 600
 
