@@ -10,8 +10,8 @@ require (
 	github.com/spf13/viper v1.21.0
 	github.com/stretchr/testify v1.11.1
 	gonum.org/v1/gonum v0.17.0
-	k8s.io/apimachinery v0.34.5
-	k8s.io/client-go v0.34.5
+	k8s.io/apimachinery v0.34.7
+	k8s.io/client-go v0.34.7
 	sigs.k8s.io/controller-runtime v0.22.5
 	sigs.k8s.io/gateway-api-inference-extension v1.2.1
 	sigs.k8s.io/lws v0.8.0
@@ -109,7 +109,7 @@ require (
 	gopkg.in/evanphx/json-patch.v4 v4.13.0 // indirect
 	gopkg.in/inf.v0 v0.9.1 // indirect
 	gopkg.in/yaml.v3 v3.0.1
-	k8s.io/api v0.34.5
+	k8s.io/api v0.34.7
 	k8s.io/apiextensions-apiserver v0.34.3 // indirect
 	k8s.io/apiserver v0.34.3 // indirect
 	k8s.io/component-base v0.34.3 // indirect
@@ -118,5 +118,5 @@ require (
 	k8s.io/utils v0.0.0-20251002143259-bc988d571ff4
 	sigs.k8s.io/apiserver-network-proxy/konnectivity-client v0.31.2 // indirect
 	sigs.k8s.io/json v0.0.0-20250730193827-2d320260d730 // indirect
-	sigs.k8s.io/yaml v1.6.0 // indirect
+	sigs.k8s.io/yaml v1.6.0
 )
