@@ -148,7 +148,7 @@ deploy-wva-on-openshift: manifests kustomize ## Deploy WVA to OpenShift cluster 
 undeploy-wva-on-openshift:
 	@echo ">>> Undeploying workload-variant-autoscaler from OpenShift"
 	export KIND=$(KIND) KUBECTL=$(KUBECTL) ENVIRONMENT=openshift && \
-		DEPLOY_LLM_D=$(DEPLOY_LLM_D) deploy/install.sh --undeploy
+		DEPLOY_LLM_D=$(DEPLOY_LLM_D) WVA_NS=$(WVA_NS) LLMD_NS=$(LLMD_NS) deploy/install.sh --undeploy
 
 ## Deploy WVA on Kubernetes with the specified image.
 .PHONY: deploy-wva-on-k8s

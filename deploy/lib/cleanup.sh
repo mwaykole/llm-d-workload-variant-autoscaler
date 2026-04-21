@@ -49,20 +49,20 @@ undeploy_llm_d_infrastructure() {
         RELEASE="$WELL_LIT_PATH_NAME"
     fi
 
+    # Uninstall Helm releases (does not require local directory)
+    log_info "Removing llm-d core components..."
+
+    helm uninstall "infra-$RELEASE" -n "${LLMD_NS}" 2>/dev/null || \
+        log_warning "llm-d infra components not found or already uninstalled"
+    helm uninstall "gaie-$RELEASE" -n "${LLMD_NS}" 2>/dev/null || \
+        log_warning "llm-d inference-scheduler components not found or already uninstalled"
+    helm uninstall "ms-$RELEASE" -n "${LLMD_NS}" 2>/dev/null || \
+        log_warning "llm-d ModelService components not found or already uninstalled"
+
     if [ ! -d "$EXAMPLE_DIR" ]; then
-        log_warning "llm-d example directory not found, skipping cleanup"
+        log_warning "llm-d example directory not found, skipping local cleanup"
     else
         cd "$EXAMPLE_DIR"
-
-        log_info "Removing llm-d core components..."
-
-        helm uninstall "infra-$RELEASE" -n "${LLMD_NS}" 2>/dev/null || \
-            log_warning "llm-d infra components not found or already uninstalled"
-        helm uninstall "gaie-$RELEASE" -n "${LLMD_NS}" 2>/dev/null || \
-            log_warning "llm-d inference-scheduler components not found or already uninstalled"
-        helm uninstall "ms-$RELEASE" -n "${LLMD_NS}" 2>/dev/null || \
-            log_warning "llm-d ModelService components not found or already uninstalled"
-
     fi
 
     # Remove HF token secret
