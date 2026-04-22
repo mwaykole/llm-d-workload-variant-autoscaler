@@ -12,7 +12,7 @@ rules:
     name:
       matches: "^wva_desired_replicas"
       as: "wva_desired_replicas"
-    metricsQuery: 'wva_desired_replicas{<<.LabelMatchers>>}'
+    metricsQuery: 'max by (exported_namespace, variant_name) (wva_desired_replicas{<<.LabelMatchers>>})'
 
 replicas: 2
 logLevel: 4
