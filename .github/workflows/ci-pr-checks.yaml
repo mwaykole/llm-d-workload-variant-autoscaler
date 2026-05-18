@@ -153,6 +153,22 @@ jobs:
         run: |
           make test
 
+  kustomize-build:
+    if: github.event_name != 'issue_comment'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@v6
+
+      - name: Install kustomize
+        run: make kustomize
+
+      - name: Build config/default overlay
+        run: bin/kustomize build config/default/ > /dev/null
+
+      - name: Build config/openshift overlay
+        run: bin/kustomize build config/openshift/ > /dev/null
+
   # Check if full e2e tests should run (via workflow_dispatch or comment trigger)
   check-full-tests:
     runs-on: ubuntu-latest
@@ -323,7 +339,7 @@ jobs:
           SCALE_TO_ZERO_ENABLED: "false"
           CREATE_CLUSTER: "true"
           INSTALL_GATEWAY_CTRLPLANE: "true"
-          E2E_TESTS_ENABLED: "true"
+          # Emulated Kind: chart decode may be removed post-deploy (LLMD_REMOVE_EMULATED_DECODE_DEPLOYMENTS, default true).
           # Pin llm-d release for deterministic CI behavior
           LLM_D_RELEASE: "v0.6.0"
           # Dual-controller smoke installs a second Helm release; chart path must be explicit in CI.
@@ -437,12 +453,12 @@ jobs:
           SCALE_TO_ZERO_ENABLED: "true"
           CREATE_CLUSTER: "true"
           INSTALL_GATEWAY_CTRLPLANE: "true"
-          E2E_TESTS_ENABLED: "true"
           LLM_D_RELEASE: "v0.6.0"
           IMG: ${{ steps.build-image.outputs.image }}
           SKIP_BUILD: "true"
           PROMETHEUS_ADAPTER_WAIT: "false"
           DELETE_CLUSTER: "false"
+          # Same simulator saturation tuning as smoke — defaults are too high for reliable scale-up signals.
           KV_SPARE_TRIGGER: "0.5"
           QUEUE_SPARE_TRIGGER: "4.5"
         run: |

@@ -998,37 +998,6 @@ func (a *authRoundTripper) RoundTrip(req *http.Request) (*http.Response, error) 
 	return a.rt.RoundTrip(req)
 }
 
-// creates a new Prometheus client for e2e tests
-func NewPrometheusClient(baseURL string, insecureSkipVerify bool) (*PrometheusClient, error) {
-	config := promAPI.Config{
-		Address: baseURL,
-	}
-
-	roundTripper := promAPI.DefaultRoundTripper
-	if rt, ok := roundTripper.(*http.Transport); ok {
-		if insecureSkipVerify {
-			rt.TLSClientConfig = &tls.Config{InsecureSkipVerify: true}
-		}
-	}
-
-	if token := os.Getenv("PROMETHEUS_TOKEN"); token != "" {
-		roundTripper = &authRoundTripper{
-			token: token,
-			rt:    roundTripper,
-		}
-	}
-	config.RoundTripper = roundTripper
-
-	client, err := promAPI.NewClient(config)
-	if err != nil {
-		return nil, fmt.Errorf("failed to create prometheus client: %w", err)
-	}
-
-	return &PrometheusClient{
-		client: promv1.NewAPI(client),
-	}, nil
-}
-
 // GetPrometheusServiceInfoFromConfigMap reads the Prometheus service info from the WVA controller configmap.
 // It reads the workload-variant-autoscaler-variantautoscaling-config configmap and extracts
 // the service name, namespace, and port from PROMETHEUS_BASE_URL.
@@ -1072,6 +1041,37 @@ func GetPrometheusServiceInfoFromConfigMap(ctx context.Context, k8sClient *kuber
 	}, nil
 }
 
+// NewPrometheusClient creates a new Prometheus client for e2e tests
+func NewPrometheusClient(baseURL string, insecureSkipVerify bool) (*PrometheusClient, error) {
+	config := promAPI.Config{
+		Address: baseURL,
+	}
+
+	roundTripper := promAPI.DefaultRoundTripper
+	if rt, ok := roundTripper.(*http.Transport); ok {
+		if insecureSkipVerify {
+			rt.TLSClientConfig = &tls.Config{InsecureSkipVerify: true}
+		}
+	}
+
+	if token := os.Getenv("PROMETHEUS_TOKEN"); token != "" {
+		roundTripper = &authRoundTripper{
+			token: token,
+			rt:    roundTripper,
+		}
+	}
+	config.RoundTripper = roundTripper
+
+	client, err := promAPI.NewClient(config)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create prometheus client: %w", err)
+	}
+
+	return &PrometheusClient{
+		client: promv1.NewAPI(client),
+	}, nil
+}
+
 // QueryWithRetry queries Prometheus API with retries and returns the metric value
 func (p *PrometheusClient) QueryWithRetry(ctx context.Context, query string) (float64, error) {
 	var result float64
@@ -1098,8 +1098,6 @@ func (p *PrometheusClient) QueryWithRetry(ctx context.Context, query string) (fl
 			return false, queryErr // Stop retrying, return error
 		}
 
-		// Log retry attempt
-		fmt.Printf("Debug: Prometheus query failed, will retry: %v\n", queryErr)
 		return false, nil // Continue retrying
 	})
 
@@ -1310,19 +1308,17 @@ func SetupTestEnvironment(image string, numNodes, gpusPerNode int, gpuTypes stri
 	gom.Expect(os.Setenv("WVA_IMAGE_PULL_POLICY", "IfNotPresent")).To(gom.Succeed()) // The image is built locally by the tests
 	gom.Expect(os.Setenv("CREATE_CLUSTER", "true")).To(gom.Succeed())                // Always create a new cluster for E2E tests
 
-	// Enable components needed for the tests
-	gom.Expect(os.Setenv("DEPLOY_LLM_D", "true")).To(gom.Succeed())
+	// llm-d stack is deployed by ./deploy/install-llmd-infra.sh (fixtures / Makefile); install.sh does not own it.
+	// Chart-managed VariantAutoscaling / HPA are opt-in Helm values — tests typically apply their own CRs instead.
+	// Enable components needed for the tests (Makefile deploy-e2e-infra runs install.sh + install-llmd-infra.sh)
 	gom.Expect(os.Setenv("DEPLOY_WVA", "true")).To(gom.Succeed())
 	gom.Expect(os.Setenv("DEPLOY_PROMETHEUS", "true")).To(gom.Succeed())
 	gom.Expect(os.Setenv("DEPLOY_PROMETHEUS_ADAPTER", "true")).To(gom.Succeed())
-	gom.Expect(os.Setenv("E2E_TESTS_ENABLED", "true")).To(gom.Succeed())
 	gom.Expect(os.Setenv("WVA_RECONCILE_INTERVAL", "30s")).To(gom.Succeed())
 
-	// Disable components not needed to be deployed by the script
-	gom.Expect(os.Setenv("DEPLOY_LLM_D_INFERENCE_SIM", "false")).To(gom.Succeed()) // tests deploy their own llm-d-sim deployments
-	gom.Expect(os.Setenv("DEPLOY_VA", "false")).To(gom.Succeed())                  // tests create their own VariantAutoscaling resources
-	gom.Expect(os.Setenv("DEPLOY_HPA", "false")).To(gom.Succeed())                 // tests create their own HPAs if needed
-	gom.Expect(os.Setenv("VLLM_SVC_ENABLED", "false")).To(gom.Succeed())           // tests deploy their own Service
+	// install-llmd-infra: skip default ModelService; tests deploy their own workloads
+	gom.Expect(os.Setenv("DEPLOY_LLM_D_INFERENCE_SIM", "false")).To(gom.Succeed())
+	gom.Expect(os.Setenv("VLLM_SVC_ENABLED", "false")).To(gom.Succeed()) // tests deploy their own Service
 }
 
 // DeleteAllVariantAutoscalings deletes all VariantAutoscaling objects in a namespace

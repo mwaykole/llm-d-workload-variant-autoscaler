@@ -36,6 +36,7 @@ import (
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/collector/registration"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/collector/source"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/config"
+	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/constants"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/discovery"
 	queueingmodel "github.com/llm-d/llm-d-workload-variant-autoscaler/internal/engines/analyzers/queueingmodel"
 	saturation_v2 "github.com/llm-d/llm-d-workload-variant-autoscaler/internal/engines/analyzers/saturation_v2"
@@ -140,6 +141,7 @@ type Engine struct {
 	// CostAwareOptimizer (unlimited) or GreedyByScoreOptimizer (limited).
 	optimizer pipeline.ScalingOptimizer
 
+	metricsEmitter *metrics.MetricsEmitter
 	// v1AnalyzerFactory produces a fresh V1 saturation analyzer for each
 	// role group in optimizeV1. NewEngine sets defaultV1AnalyzerFactory;
 	// tests can replace this per-instance to inject stubs or spies.
@@ -186,6 +188,7 @@ func NewEngine(client client.Client, scheme *runtime.Scheme, recorder record.Eve
 		queueingModelAnalyzer:   queueingmodel.NewQueueingModelAnalyzer(),
 		capacityStore:           capacityStore,
 		optimizer:               scalingOptimizer,
+		metricsEmitter:          metrics.NewMetricsEmitter(),
 		v1AnalyzerFactory:       defaultV1AnalyzerFactory,
 	}
 
@@ -219,7 +222,24 @@ func NewEngine(client client.Client, scheme *runtime.Scheme, recorder record.Eve
 // StartOptimizeLoop starts the optimization loop for the saturation engine.
 // It runs until the context is cancelled.
 func (e *Engine) StartOptimizeLoop(ctx context.Context) {
+	e.recordActiveOptimizer() // record active optimizer
+	metrics.SetConfigOptimizationInterval(float64(e.Config.OptimizationInterval().Seconds()))
 	e.executor.Start(ctx)
+}
+
+func (e *Engine) recordActiveOptimizer() {
+	// Record metrics for which optimizer is active
+	optimizerNames := []string{
+		pipeline.GreedyByScoreOptimizerName,
+		pipeline.CostAwareOptimizerName,
+	}
+	for _, name := range optimizerNames {
+		isActive := false // default is false
+		if name == e.optimizer.Name() {
+			isActive = true // only one active at a time
+		}
+		e.metricsEmitter.RecordOptimizerActiveMetric(name, isActive)
+	}
 }
 
 // optimize performs the optimization logic.
@@ -321,10 +341,14 @@ func (e *Engine) optimize(ctx context.Context) (retErr error) {
 	// Select optimizer based on enableLimiter flag (both are stateless, safe to swap)
 	// Applies to V2 and queueing-model paths which both use the optimizer pipeline.
 	if analyzerName == interfaces.SaturationAnalyzerName || analyzerName == interfaces.QueueingModelAnalyzerName {
+		savedOptimizer := e.optimizer
 		if enableLimiter {
 			e.optimizer = pipeline.NewGreedyByScoreOptimizer()
 		} else {
 			e.optimizer = pipeline.NewCostAwareOptimizer()
+		}
+		if savedOptimizer != e.optimizer {
+			e.recordActiveOptimizer() // optimizer has changed, record active optimizer
 		}
 		logger.V(logging.DEBUG).Info("Optimizer selected", "analyzer", analyzerName, "optimizer", e.optimizer.Name(), "enableLimiter", enableLimiter)
 	}
@@ -367,6 +391,20 @@ func (e *Engine) optimize(ctx context.Context) (retErr error) {
 	return nil
 }
 
+// Resolve saturation config and record config metrics
+func (e *Engine) resolveSaturationConfig(
+	configMap map[string]config.SaturationScalingConfig,
+	modelID, namespace string,
+) config.SaturationScalingConfig {
+	config := resolveSaturationConfig(configMap, modelID, namespace)
+	// record config metric after resolution instead of where the configmaps are reconciled. Here we
+	// have the exact values being used by the optimize engine.
+	metrics.SetConfigKvSpareThreshold(config.KvSpareTrigger)
+	metrics.SetConfigQueueSpareThreshold(config.QueueSpareTrigger)
+	metrics.SetConfigInfo(config.AnalyzerName, config.EnableLimiter, e.Config.ScaleToZeroEnabled())
+	return config
+}
+
 // optimizeV1 runs the V1 percentage-based saturation analysis path (saturation-percentage-based).
 // Processes each model independently: analyze → enforce → convert → limiter.
 //
@@ -401,10 +439,11 @@ func (e *Engine) optimizeV1(
 			continue
 		}
 
-		saturationConfig := resolveSaturationConfig(saturationConfigMap, modelID, namespace)
+		saturationConfig := e.resolveSaturationConfig(saturationConfigMap, modelID, namespace)
 
 		// Prepare model data once per model (single metrics collection pass).
 		data, err := e.prepareModelData(ctx, modelID, modelVAs, e.client)
+
 		if err != nil {
 			logger.Error(err, "Saturation data preparation failed", "modelID", modelID)
 			e.emitSafetyNetMetrics(ctx, modelVAs, currentAllocations, nil)
@@ -583,6 +622,8 @@ func (e *Engine) optimizeV2(
 
 	// Stage 1: Collect ModelScalingRequests for all models
 	var requests []pipeline.ModelScalingRequest
+	// modelReplicaMetrics collects per-model replica metrics for KV token enrichment
+	modelReplicaMetrics := make(map[string][]interfaces.ReplicaMetrics)
 
 	for groupKey, modelVAs := range modelGroups {
 		modelID := modelVAs[0].Spec.ModelID
@@ -600,8 +641,8 @@ func (e *Engine) optimizeV2(
 				"namespace", namespace, "modelID", modelID)
 			continue
 		}
-		saturationConfig := resolveSaturationConfig(saturationConfigMap, modelID, namespace)
 
+		saturationConfig := e.resolveSaturationConfig(saturationConfigMap, modelID, namespace)
 		data, err := e.prepareModelData(ctx, modelID, modelVAs, e.client)
 		if err != nil {
 			logger.Error(err, "Model data preparation failed", "modelID", modelID)
@@ -623,6 +664,7 @@ func (e *Engine) optimizeV2(
 		}
 
 		requests = append(requests, *req)
+		modelReplicaMetrics[modelID] = data.replicaMetrics
 	}
 
 	if len(requests) == 0 {
@@ -669,6 +711,11 @@ func (e *Engine) optimizeV2(
 				"modelID", req.ModelID)
 		}
 	}
+
+	// Stage 4: Enrich decisions with KV cache token data from replicaMetrics.
+	// Utilization, RequiredCapacity, and SpareCapacity are already set by
+	// buildDecisionsWithOptimizer from AnalyzerResult.
+	enrichDecisionsWithKvTokenData(allDecisions, modelReplicaMetrics)
 
 	return allDecisions
 }
@@ -868,6 +915,46 @@ func (e *Engine) convertSaturationTargetsToDecisions(
 	}
 
 	return decisions
+}
+
+// enrichDecisionsWithKvTokenData sets KvCacheTokensUsed, KvCacheTokensCapacity, and
+// RequiredCapacityUnit on decisions from replica metrics aggregated per (model, variant).
+// Used by V2 path where Utilization and RequiredCapacity are already set from
+// AnalyzerResult.
+//
+// Aggregation is keyed by (modelID, variantName) — not just variantName — because
+// variant names can collide across different models in the same reconcile cycle.
+func enrichDecisionsWithKvTokenData(decisions []interfaces.VariantDecision, modelReplicaMetrics map[string][]interfaces.ReplicaMetrics) {
+	type kvAgg struct {
+		kvUsed  int64
+		kvTotal int64
+	}
+	type variantKey struct {
+		modelID string
+		variant string
+	}
+	agg := make(map[variantKey]*kvAgg)
+	for modelID, metrics := range modelReplicaMetrics {
+		for _, rm := range metrics {
+			k := variantKey{modelID: modelID, variant: rm.VariantName}
+			a, ok := agg[k]
+			if !ok {
+				a = &kvAgg{}
+				agg[k] = a
+			}
+			a.kvUsed += rm.TokensInUse
+			a.kvTotal += rm.TotalKvCapacityTokens
+		}
+	}
+
+	for i := range decisions {
+		d := &decisions[i]
+		d.RequiredCapacityUnit = constants.UnitContinuous
+		if a, ok := agg[variantKey{modelID: d.ModelID, variant: d.VariantName}]; ok {
+			d.KvCacheTokensUsed = a.kvUsed
+			d.KvCacheTokensCapacity = a.kvTotal
+		}
+	}
 }
 
 // hasMinReplicasAboveZero returns true if any variant in the states has MinReplicas > 0.
@@ -1086,12 +1173,17 @@ func (e *Engine) applySaturationDecisions(
 				"variant", vaName)
 		}
 
-		// Fetch latest version from API server to avoid conflicts
+		// Fetch latest version from API server to avoid conflicts.
+		// Synthetic (annotation-sourced) variants have no CRD instance; use the in-memory copy.
 		var updateVa llmdVariantAutoscalingV1alpha1.VariantAutoscaling
-		if err := utils.GetVariantAutoscalingWithBackoff(ctx, e.client, va.Name, va.Namespace, &updateVa); err != nil {
-			logger.Error(err, "Failed to get latest VA from API server",
-				"name", va.Name)
-			continue
+		if utils.IsSynthetic(va) {
+			updateVa = *va.DeepCopy()
+		} else {
+			if err := utils.GetVariantAutoscalingWithBackoff(ctx, e.client, va.Name, va.Namespace, &updateVa); err != nil {
+				logger.Error(err, "Failed to get latest VA from API server",
+					"name", va.Name)
+				continue
+			}
 		}
 
 		// Update CurrentAlloc from local analysis (which has the latest metrics)
@@ -1160,20 +1252,23 @@ func (e *Engine) applySaturationDecisions(
 		if acceleratorName == "" {
 			logger.Info("Skipping status update for VA without accelerator info, but setting MetricsAvailable=False",
 				"variant", vaName, "cacheKey.name", va.Name, "cacheKey.namespace", va.Namespace)
-			// Still set the cache entry so the controller can set MetricsAvailable=False.
-			// This is a partial decision for metrics status only - other fields like
-			// TargetReplicas and AcceleratorName are left at zero values since we don't
-			// have enough information to set them.
-			common.DecisionCache.Set(va.Name, va.Namespace, interfaces.VariantDecision{
-				VariantName:      vaName,
-				Namespace:        va.Namespace,
-				MetricsAvailable: false,
-				MetricsReason:    llmdVariantAutoscalingV1alpha1.ReasonMetricsMissing,
-				MetricsMessage:   llmdVariantAutoscalingV1alpha1.MessageMetricsUnavailable,
-			})
-			// Trigger reconciler to apply the condition
-			common.DecisionTrigger <- event.GenericEvent{
-				Object: &updateVa,
+			// Synthetic variants have no CRD status to patch; skip cache/trigger.
+			if !utils.IsSynthetic(va) {
+				// Still set the cache entry so the controller can set MetricsAvailable=False.
+				// This is a partial decision for metrics status only - other fields like
+				// TargetReplicas and AcceleratorName are left at zero values since we don't
+				// have enough information to set them.
+				common.DecisionCache.Set(va.Name, va.Namespace, interfaces.VariantDecision{
+					VariantName:      vaName,
+					Namespace:        va.Namespace,
+					MetricsAvailable: false,
+					MetricsReason:    llmdVariantAutoscalingV1alpha1.ReasonMetricsMissing,
+					MetricsMessage:   llmdVariantAutoscalingV1alpha1.MessageMetricsUnavailable,
+				})
+				// Trigger reconciler to apply the condition
+				common.DecisionTrigger <- event.GenericEvent{
+					Object: &updateVa,
+				}
 			}
 			continue
 		}
@@ -1249,39 +1344,51 @@ func (e *Engine) applySaturationDecisions(
 			updateVa.Status.Actuation.Applied = true
 		}
 
-		// Update Shared State and Trigger Reconcile via Channel
-		// This avoids any API server interaction from the Engine.
-
-		// 1. Update Cache
-		// Determine MetricsAvailable status for the cache.
-		// - hasAllocation is true when we successfully collected current replica metrics
-		//   for this variant during this loop (metrics pipeline is working).
-		// - hasDecision is true when the optimizer produced a scaling decision based on
-		//   saturation metrics in this run.
-		// Either condition implies saturation metrics were available and usable.
-		metricsAvailable := hasAllocation || hasDecision
-		metricsReason := llmdVariantAutoscalingV1alpha1.ReasonMetricsMissing
-		metricsMessage := llmdVariantAutoscalingV1alpha1.MessageMetricsUnavailable
-		if metricsAvailable {
-			metricsReason = llmdVariantAutoscalingV1alpha1.ReasonMetricsFound
-			metricsMessage = llmdVariantAutoscalingV1alpha1.MessageMetricsAvailable
+		// Record saturation and capacity metrics when this cycle produced a
+		// fresh decision for the variant. When there is no fresh decision the
+		// existing series persist with their last-recorded values until
+		// Prometheus' staleness marker fires; surfacing freshness on the
+		// dashboard side is tracked in #1082 (an explicit "up" gauge per VA,
+		// rather than deleting series here).
+		if hasDecision {
+			act.RecordSaturationMetrics(ctx, decision)
 		}
 
-		common.DecisionCache.Set(va.Name, va.Namespace, interfaces.VariantDecision{
-			VariantName:       vaName,
-			Namespace:         va.Namespace,
-			TargetReplicas:    targetReplicas,
-			AcceleratorName:   acceleratorName,
-			LastRunTime:       metav1.Now(),
-			CurrentAllocation: currentAllocations[vaName],
-			MetricsAvailable:  metricsAvailable,
-			MetricsReason:     metricsReason,
-			MetricsMessage:    metricsMessage,
-		})
+		// Update Shared State and Trigger Reconcile via Channel.
+		// Synthetic (annotation-sourced) variants have no CRD status to patch;
+		// metric emission above is their sole output, so skip cache/trigger.
+		if !utils.IsSynthetic(va) {
+			// 1. Update Cache
+			// Determine MetricsAvailable status for the cache.
+			// - hasAllocation is true when we successfully collected current replica metrics
+			//   for this variant during this loop (metrics pipeline is working).
+			// - hasDecision is true when the optimizer produced a scaling decision based on
+			//   saturation metrics in this run.
+			// Either condition implies saturation metrics were available and usable.
+			metricsAvailable := hasAllocation || hasDecision
+			metricsReason := llmdVariantAutoscalingV1alpha1.ReasonMetricsMissing
+			metricsMessage := llmdVariantAutoscalingV1alpha1.MessageMetricsUnavailable
+			if metricsAvailable {
+				metricsReason = llmdVariantAutoscalingV1alpha1.ReasonMetricsFound
+				metricsMessage = llmdVariantAutoscalingV1alpha1.MessageMetricsAvailable
+			}
 
-		// 2. Trigger Reconciler
-		common.DecisionTrigger <- event.GenericEvent{
-			Object: &updateVa,
+			common.DecisionCache.Set(va.Name, va.Namespace, interfaces.VariantDecision{
+				VariantName:       vaName,
+				Namespace:         va.Namespace,
+				TargetReplicas:    targetReplicas,
+				AcceleratorName:   acceleratorName,
+				LastRunTime:       metav1.Now(),
+				CurrentAllocation: currentAllocations[vaName],
+				MetricsAvailable:  metricsAvailable,
+				MetricsReason:     metricsReason,
+				MetricsMessage:    metricsMessage,
+			})
+
+			// 2. Trigger Reconciler
+			common.DecisionTrigger <- event.GenericEvent{
+				Object: &updateVa,
+			}
 		}
 
 		if hasDecision {

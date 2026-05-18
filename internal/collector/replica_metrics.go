@@ -21,6 +21,23 @@ limitations under the License.
 // source infrastructure. Saturation metrics (KV cache, queue length, token
 // capacity) and queueing model metrics (scheduler dispatch rate, max batch
 // size) are collected together and exposed via the shared ReplicaMetrics struct.
+//
+// # Pod label fallback
+//
+// Every processing block in Refresh() extracts a pod identity from Prometheus
+// labels using a two-step fallback:
+//
+//	podName := value.Labels["pod"]
+//	if podName == "" {
+//	    podName = value.Labels["pod_name"]
+//	}
+//
+// vLLM metrics are typically scraped via a PodMonitor or ServiceMonitor that
+// applies the Prometheus operator's default target-relabeling, which produces
+// a "pod" label. Some scrape configurations (e.g., raw Prometheus scrape jobs,
+// kube-state-metrics–style configs) instead expose the pod identity as
+// "pod_name". The fallback handles both conventions so the collector works
+// regardless of how the Prometheus scrape is configured.
 package collector
 
 import (
@@ -28,6 +45,7 @@ import (
 	"fmt"
 	"math"
 	"strconv"
+	"strings"
 	"time"
 
 	ctrl "sigs.k8s.io/controller-runtime"
@@ -102,6 +120,7 @@ func (c *ReplicaMetricsCollector) CollectReplicaMetrics(
 	// - Saturation: KV cache, queue length, cache config, prefix cache hit rate
 	// - Shared (saturation + queueing model): avg input tokens, avg output tokens
 	// - Queueing model: scheduler dispatch rate, avg TTFT, avg ITL
+	// - Throughput analyzer: generation token rate, instantaneous KV usage (k*), vLLM request rate
 	queries := []string{
 		registration.QueryKvCacheUsage,
 		registration.QueryQueueLength,
@@ -112,6 +131,9 @@ func (c *ReplicaMetricsCollector) CollectReplicaMetrics(
 		registration.QuerySchedulerDispatchRate,
 		registration.QueryAvgTTFT,
 		registration.QueryAvgITL,
+		registration.QueryGenerationTokenRate,
+		registration.QueryKvUsageInstant,
+		registration.QueryVLLMRequestRate,
 	}
 
 	// Execute the query with timing
@@ -130,11 +152,12 @@ func (c *ReplicaMetricsCollector) CollectReplicaMetrics(
 		metrics.IncMetricsCollectionErrors(constants.QueryTypeKVCache, reason)
 		metrics.IncMetricsCollectionErrors(constants.QueryTypeQueueLength, reason)
 		metrics.IncMetricsCollectionErrors(constants.QueryTypeCacheConfig, reason)
-		return nil, fmt.Errorf("failed to refresh saturation metrics: %w", err)
+		return nil, fmt.Errorf("failed to refresh replica metrics: %w", err)
 	}
 
 	// podMetricData holds per-pod metric values and timestamps
 	type podMetricData struct {
+		podName        string // Actual pod name for K8s API lookups
 		kvUsage        float64
 		kvTimestamp    time.Time
 		hasKv          bool
@@ -160,6 +183,10 @@ func (c *ReplicaMetricsCollector) CollectReplicaMetrics(
 		avgTTFTTimestamp     time.Time
 		avgITL               float64
 		avgITLTimestamp      time.Time
+		// Throughput analyzer fields
+		generationTokenRate float64
+		kvUsageInstant      float64
+		vllmRequestRate     float64
 	}
 
 	// trackMetricFreshness determines the freshness status of metrics in podMetricData
@@ -201,6 +228,43 @@ func (c *ReplicaMetricsCollector) CollectReplicaMetrics(
 		trackTimestamp(data.avgITLTimestamp)
 	}
 
+	// Helper function to build consistent instance key from labels
+	// Prefers pod_name:port format for consistency with scheduler metrics
+	// Falls back to instance (IP:port) if pod_name is not available
+	buildInstanceKey := func(labels map[string]string) (string, string) {
+		podName := labels["pod"]
+		if podName == "" {
+			podName = labels["pod_name"]
+		}
+
+		// Try to extract port from instance label (IP:port format)
+		instance := labels["instance"]
+		port := ""
+		if instance != "" && podName != "" {
+			// Extract port from instance (format: IP:port)
+			if idx := strings.LastIndex(instance, ":"); idx != -1 {
+				port = instance[idx+1:]
+			}
+		}
+
+		// Build composite key: pod_name:port (consistent with scheduler metrics)
+		var instanceKey string
+		switch {
+		case podName != "" && port != "":
+			instanceKey = podName + ":" + port
+		case instance != "":
+			// Fallback to instance if we can't build pod_name:port
+			instanceKey = instance
+		case podName != "":
+			// Fallback to just pod name if no port available
+			instanceKey = podName
+		default:
+			return "", ""
+		}
+
+		return instanceKey, podName
+	}
+
 	// Extract per-pod metrics from results
 	podData := make(map[string]*podMetricData)
 
@@ -210,22 +274,22 @@ func (c *ReplicaMetricsCollector) CollectReplicaMetrics(
 			return nil, fmt.Errorf("KV cache query failed: %w", result.Error)
 		}
 		for _, value := range result.Values {
-			podName := value.Labels["pod"]
-			if podName == "" {
-				podName = value.Labels["pod_name"]
-			}
-			if podName == "" {
+			instanceKey, podName := buildInstanceKey(value.Labels)
+			if instanceKey == "" {
 				continue
 			}
 
-			if podData[podName] == nil {
-				podData[podName] = &podMetricData{}
+			if podData[instanceKey] == nil {
+				podData[instanceKey] = &podMetricData{
+					podName: podName,
+				}
 			}
-			podData[podName].kvUsage = value.Value
-			podData[podName].kvTimestamp = value.Timestamp
-			podData[podName].hasKv = true
+			podData[instanceKey].kvUsage = value.Value
+			podData[instanceKey].kvTimestamp = value.Timestamp
+			podData[instanceKey].hasKv = true
 
 			logger.V(logging.DEBUG).Info("KV cache metric",
+				"instanceKey", instanceKey,
 				"pod", podName,
 				"usage", value.Value,
 				"usagePercent", value.Value*100)
@@ -238,22 +302,22 @@ func (c *ReplicaMetricsCollector) CollectReplicaMetrics(
 			return nil, fmt.Errorf("queue length query failed: %w", result.Error)
 		}
 		for _, value := range result.Values {
-			podName := value.Labels["pod"]
-			if podName == "" {
-				podName = value.Labels["pod_name"]
-			}
-			if podName == "" {
+			instanceKey, podName := buildInstanceKey(value.Labels)
+			if instanceKey == "" {
 				continue
 			}
 
-			if podData[podName] == nil {
-				podData[podName] = &podMetricData{}
+			if podData[instanceKey] == nil {
+				podData[instanceKey] = &podMetricData{
+					podName: podName,
+				}
 			}
-			podData[podName].queueLen = int(value.Value)
-			podData[podName].queueTimestamp = value.Timestamp
-			podData[podName].hasQueue = true
+			podData[instanceKey].queueLen = int(value.Value)
+			podData[instanceKey].queueTimestamp = value.Timestamp
+			podData[instanceKey].hasQueue = true
 
 			logger.V(logging.DEBUG).Info("Queue metric",
+				"instanceKey", instanceKey,
 				"pod", podName,
 				"queueLength", int(value.Value))
 		}
@@ -263,38 +327,38 @@ func (c *ReplicaMetricsCollector) CollectReplicaMetrics(
 	if result := results[registration.QueryCacheConfigInfo]; result != nil {
 		if !result.HasError() {
 			for _, value := range result.Values {
-				podName := value.Labels["pod"]
-				if podName == "" {
-					podName = value.Labels["pod_name"]
-				}
-				if podName == "" {
+				instanceKey, podName := buildInstanceKey(value.Labels)
+				if instanceKey == "" {
 					continue
 				}
 
-				if podData[podName] == nil {
-					podData[podName] = &podMetricData{}
+				if podData[instanceKey] == nil {
+					podData[instanceKey] = &podMetricData{
+						podName: podName,
+					}
 				}
 
 				// Parse num_gpu_blocks and block_size from string labels
 				if blocksStr, ok := value.Labels["num_gpu_blocks"]; ok && blocksStr != "" {
 					if blocks, err := strconv.ParseInt(blocksStr, 10, 64); err == nil {
-						podData[podName].numGpuBlocks = blocks
+						podData[instanceKey].numGpuBlocks = blocks
 					}
 				}
 				if sizeStr, ok := value.Labels["block_size"]; ok && sizeStr != "" {
 					if size, err := strconv.ParseInt(sizeStr, 10, 64); err == nil {
-						podData[podName].blockSize = size
+						podData[instanceKey].blockSize = size
 					}
 				}
-				if podData[podName].numGpuBlocks > 0 && podData[podName].blockSize > 0 {
-					podData[podName].hasCacheConfig = true
-					podData[podName].cacheConfigTimestamp = value.Timestamp
+				if podData[instanceKey].numGpuBlocks > 0 && podData[instanceKey].blockSize > 0 {
+					podData[instanceKey].hasCacheConfig = true
+					podData[instanceKey].cacheConfigTimestamp = value.Timestamp
 				}
 
 				logger.V(logging.DEBUG).Info("Cache config info metric",
+					"instanceKey", instanceKey,
 					"pod", podName,
-					"numGpuBlocks", podData[podName].numGpuBlocks,
-					"blockSize", podData[podName].blockSize)
+					"numGpuBlocks", podData[instanceKey].numGpuBlocks,
+					"blockSize", podData[instanceKey].blockSize)
 			}
 		}
 	}
@@ -303,21 +367,20 @@ func (c *ReplicaMetricsCollector) CollectReplicaMetrics(
 	if result := results[registration.QueryAvgOutputTokens]; result != nil {
 		if !result.HasError() {
 			for _, value := range result.Values {
-				podName := value.Labels["pod"]
-				if podName == "" {
-					podName = value.Labels["pod_name"]
-				}
-				if podName == "" {
+				instanceKey, podName := buildInstanceKey(value.Labels)
+				if instanceKey == "" {
 					continue
 				}
 
-				if podData[podName] == nil {
-					podData[podName] = &podMetricData{}
+				if podData[instanceKey] == nil {
+					podData[instanceKey] = &podMetricData{
+						podName: podName,
+					}
 				}
 				// NaN check: rate division by zero produces NaN
 				if !math.IsNaN(value.Value) && !math.IsInf(value.Value, 0) {
-					podData[podName].avgOutputTokens = value.Value
-					podData[podName].avgOutputTokensTimestamp = value.Timestamp
+					podData[instanceKey].avgOutputTokens = value.Value
+					podData[instanceKey].avgOutputTokensTimestamp = value.Timestamp
 				}
 			}
 		}
@@ -327,21 +390,20 @@ func (c *ReplicaMetricsCollector) CollectReplicaMetrics(
 	if result := results[registration.QueryAvgInputTokens]; result != nil {
 		if !result.HasError() {
 			for _, value := range result.Values {
-				podName := value.Labels["pod"]
-				if podName == "" {
-					podName = value.Labels["pod_name"]
-				}
-				if podName == "" {
+				instanceKey, podName := buildInstanceKey(value.Labels)
+				if instanceKey == "" {
 					continue
 				}
 
-				if podData[podName] == nil {
-					podData[podName] = &podMetricData{}
+				if podData[instanceKey] == nil {
+					podData[instanceKey] = &podMetricData{
+						podName: podName,
+					}
 				}
 				// NaN check: rate division by zero produces NaN
 				if !math.IsNaN(value.Value) && !math.IsInf(value.Value, 0) {
-					podData[podName].avgInputTokens = value.Value
-					podData[podName].avgInputTokensTimestamp = value.Timestamp
+					podData[instanceKey].avgInputTokens = value.Value
+					podData[instanceKey].avgInputTokensTimestamp = value.Timestamp
 				}
 			}
 		}
@@ -351,33 +413,34 @@ func (c *ReplicaMetricsCollector) CollectReplicaMetrics(
 	if result := results[registration.QueryPrefixCacheHitRate]; result != nil {
 		if !result.HasError() {
 			for _, value := range result.Values {
-				podName := value.Labels["pod"]
-				if podName == "" {
-					podName = value.Labels["pod_name"]
-				}
-				if podName == "" {
+				instanceKey, podName := buildInstanceKey(value.Labels)
+				if instanceKey == "" {
 					continue
 				}
 
-				if podData[podName] == nil {
-					podData[podName] = &podMetricData{}
+				if podData[instanceKey] == nil {
+					podData[instanceKey] = &podMetricData{
+						podName: podName,
+					}
 				}
 				// NaN check: rate division by zero produces NaN when no prefix cache queries
 				if !math.IsNaN(value.Value) && !math.IsInf(value.Value, 0) && value.Value >= 0 && value.Value <= 1 {
-					podData[podName].prefixCacheHitRate = value.Value
-					podData[podName].prefixCacheHitRateTimestamp = value.Timestamp
+					podData[instanceKey].prefixCacheHitRate = value.Value
+					podData[instanceKey].prefixCacheHitRateTimestamp = value.Timestamp
 				}
 			}
 		}
 	}
 
-	// Process scheduler dispatch rate results (arrival rate per pod)
+	// Process scheduler dispatch rate results (arrival rate per instance)
 	if result := results[registration.QuerySchedulerDispatchRate]; result != nil {
 		if !result.HasError() {
 			for _, value := range result.Values {
-				// The scheduler metric has both "pod" (EPP scrape target) and "pod_name"
-				// (the vLLM endpoint pod). Prefer pod_name so we join with vLLM metrics.
+				// The scheduler metric has pod_name and port labels to identify the vLLM instance.
+				// Build a composite key: pod_name:port to support multiple instances per pod.
 				podName := value.Labels["pod_name"]
+				port := value.Labels["port"]
+
 				if podName == "" {
 					podName = value.Labels["pod"]
 				}
@@ -389,17 +452,27 @@ func (c *ReplicaMetricsCollector) CollectReplicaMetrics(
 					continue
 				}
 
-				if podData[podName] == nil {
-					podData[podName] = &podMetricData{}
+				// Create composite key: pod_name:port for unique instance identification
+				instanceKey := podName
+				if port != "" {
+					instanceKey = podName + ":" + port
+				}
+
+				if podData[instanceKey] == nil {
+					podData[instanceKey] = &podMetricData{
+						podName: podName,
+					}
 				}
 				// NaN check: rate can produce NaN if no successful attempts
 				if !math.IsNaN(value.Value) && !math.IsInf(value.Value, 0) && value.Value >= 0 {
-					podData[podName].arrivalRate = value.Value
-					podData[podName].hasArrivalRate = true
-					podData[podName].arrivalRateTimestamp = value.Timestamp
+					podData[instanceKey].arrivalRate = value.Value
+					podData[instanceKey].hasArrivalRate = true
+					podData[instanceKey].arrivalRateTimestamp = value.Timestamp
 
 					logger.V(logging.DEBUG).Info("Scheduler dispatch rate metric",
+						"instance", instanceKey,
 						"pod", podName,
+						"port", port,
 						"arrivalRate", value.Value)
 				}
 			}
@@ -410,22 +483,22 @@ func (c *ReplicaMetricsCollector) CollectReplicaMetrics(
 	if result := results[registration.QueryAvgTTFT]; result != nil {
 		if !result.HasError() {
 			for _, value := range result.Values {
-				podName := value.Labels["pod"]
-				if podName == "" {
-					podName = value.Labels["pod_name"]
-				}
-				if podName == "" {
+				instanceKey, podName := buildInstanceKey(value.Labels)
+				if instanceKey == "" {
 					continue
 				}
 
-				if podData[podName] == nil {
-					podData[podName] = &podMetricData{}
+				if podData[instanceKey] == nil {
+					podData[instanceKey] = &podMetricData{
+						podName: podName,
+					}
 				}
 				if !math.IsNaN(value.Value) && !math.IsInf(value.Value, 0) && value.Value > 0 {
-					podData[podName].avgTTFT = value.Value
-					podData[podName].avgTTFTTimestamp = value.Timestamp
+					podData[instanceKey].avgTTFT = value.Value
+					podData[instanceKey].avgTTFTTimestamp = value.Timestamp
 
 					logger.V(logging.DEBUG).Info("Avg TTFT metric",
+						"instanceKey", instanceKey,
 						"pod", podName,
 						"avgTTFTSeconds", value.Value)
 				}
@@ -437,6 +510,33 @@ func (c *ReplicaMetricsCollector) CollectReplicaMetrics(
 	if result := results[registration.QueryAvgITL]; result != nil {
 		if !result.HasError() {
 			for _, value := range result.Values {
+				instanceKey, podName := buildInstanceKey(value.Labels)
+				if instanceKey == "" {
+					continue
+				}
+
+				if podData[instanceKey] == nil {
+					podData[instanceKey] = &podMetricData{
+						podName: podName,
+					}
+				}
+				if !math.IsNaN(value.Value) && !math.IsInf(value.Value, 0) && value.Value > 0 {
+					podData[instanceKey].avgITL = value.Value
+					podData[instanceKey].avgITLTimestamp = value.Timestamp
+
+					logger.V(logging.DEBUG).Info("Avg ITL metric",
+						"instanceKey", instanceKey,
+						"pod", podName,
+						"avgITLSeconds", value.Value)
+				}
+			}
+		}
+	}
+
+	// Process generation token rate results (tokens/sec) — throughput analyzer μ_dec^obs
+	if result := results[registration.QueryGenerationTokenRate]; result != nil {
+		if !result.HasError() {
+			for _, value := range result.Values {
 				podName := value.Labels["pod"]
 				if podName == "" {
 					podName = value.Labels["pod_name"]
@@ -444,17 +544,53 @@ func (c *ReplicaMetricsCollector) CollectReplicaMetrics(
 				if podName == "" {
 					continue
 				}
-
 				if podData[podName] == nil {
 					podData[podName] = &podMetricData{}
 				}
-				if !math.IsNaN(value.Value) && !math.IsInf(value.Value, 0) && value.Value > 0 {
-					podData[podName].avgITL = value.Value
-					podData[podName].avgITLTimestamp = value.Timestamp
+				if !math.IsNaN(value.Value) && !math.IsInf(value.Value, 0) && value.Value >= 0 {
+					podData[podName].generationTokenRate = value.Value
+				}
+			}
+		}
+	}
 
-					logger.V(logging.DEBUG).Info("Avg ITL metric",
-						"pod", podName,
-						"avgITLSeconds", value.Value)
+	// Process instantaneous KV usage (k*) results (0.0–1.0) — throughput analyzer k*
+	if result := results[registration.QueryKvUsageInstant]; result != nil {
+		if !result.HasError() {
+			for _, value := range result.Values {
+				podName := value.Labels["pod"]
+				if podName == "" {
+					podName = value.Labels["pod_name"]
+				}
+				if podName == "" {
+					continue
+				}
+				if podData[podName] == nil {
+					podData[podName] = &podMetricData{}
+				}
+				if !math.IsNaN(value.Value) && !math.IsInf(value.Value, 0) && value.Value >= 0 && value.Value <= 1 {
+					podData[podName].kvUsageInstant = value.Value
+				}
+			}
+		}
+	}
+
+	// Process vLLM request completion rate (req/s) — throughput analyzer fallback λ_req
+	if result := results[registration.QueryVLLMRequestRate]; result != nil {
+		if !result.HasError() {
+			for _, value := range result.Values {
+				podName := value.Labels["pod"]
+				if podName == "" {
+					podName = value.Labels["pod_name"]
+				}
+				if podName == "" {
+					continue
+				}
+				if podData[podName] == nil {
+					podData[podName] = &podMetricData{}
+				}
+				if !math.IsNaN(value.Value) && !math.IsInf(value.Value, 0) && value.Value >= 0 {
+					podData[podName].vllmRequestRate = value.Value
 				}
 			}
 		}
@@ -478,7 +614,15 @@ func (c *ReplicaMetricsCollector) CollectReplicaMetrics(
 	metrics.SetMetricsPodsDiscovered(namespace, len(podData))
 	collectedAt := time.Now()
 
-	for podName, data := range podData {
+	for instanceKey, data := range podData {
+		// Use the actual pod name (not instance IP:port) for K8s API lookup
+		podName := data.podName
+		if podName == "" {
+			// Fallback: if pod name wasn't extracted from labels, use instanceKey
+			// This handles cases where the metric doesn't have pod label
+			podName = instanceKey
+		}
+
 		// Match Pod to VariantAutoscaling using indexed lookup
 		vaName := c.podVAMapper.FindVAForPod(ctx, podName, namespace, scaleTargets)
 
@@ -496,6 +640,7 @@ func (c *ReplicaMetricsCollector) CollectReplicaMetrics(
 		if !data.hasKv {
 			logger.Info("Pod missing KV cache metrics, using 0",
 				"pod", podName,
+				"instance", instanceKey,
 				"model", modelID,
 				"namespace", namespace)
 			kvUsage = 0
@@ -503,6 +648,7 @@ func (c *ReplicaMetricsCollector) CollectReplicaMetrics(
 		if !data.hasQueue {
 			logger.Info("Pod missing queue metrics, using 0",
 				"pod", podName,
+				"instance", instanceKey,
 				"model", modelID,
 				"namespace", namespace)
 			queueLen = 0
@@ -511,6 +657,7 @@ func (c *ReplicaMetricsCollector) CollectReplicaMetrics(
 		if vaName == "" {
 			logger.Info("Skipping pod that doesn't match any scale target",
 				"pod", podName,
+				"instance", instanceKey,
 				"scale targets", getScaleTargetNames(scaleTargets))
 			continue
 		}
@@ -590,6 +737,9 @@ func (c *ReplicaMetricsCollector) CollectReplicaMetrics(
 			MaxBatchSize:          maxBatchSize,
 			AvgTTFT:               data.avgTTFT,
 			AvgITL:                data.avgITL,
+			GenerationTokenRate:   data.generationTokenRate,
+			KvUsageInstant:        data.kvUsageInstant,
+			VLLMRequestRate:       data.vllmRequestRate,
 			Metadata: &interfaces.ReplicaMetricsMetadata{
 				CollectedAt:     collectedAt,
 				Age:             0, // Fresh

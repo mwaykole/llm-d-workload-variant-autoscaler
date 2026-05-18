@@ -107,13 +107,16 @@ func buildModelServiceLWS(namespace, name, poolName, modelID string, useSimulato
 	if !useSimulator {
 		image = defaultModelServiceRuntimeImage
 	}
-	args := buildModelServerArgs(modelID, useSimulator, maxNumSeqs)
+	args := buildModelServerArgs(modelID, useSimulator, maxNumSeqs, nil)
 	labels := map[string]string{
-		"app":                       appLabel,
-		"llm-d.ai/inferenceServing": defaultLabelValueTrue,
-		"llm-d.ai/model":            defaultModelServiceLabelValue,
-		"llm-d.ai/model-pool":       poolName,
-		"test-resource":             defaultTestResourceLabelValue,
+		"app":                          appLabel,
+		"llm-d.ai/inferenceServing":    defaultLabelValueTrue,
+		"llm-d.ai/model":               defaultModelServiceLabelValue,
+		"llm-d.ai/model-pool":          poolName,
+		"test-resource":                defaultTestResourceLabelValue,
+		"llm-d.ai/guide":               defaultGuideLabelValue,
+		"llm-d.ai/inference-serving":   defaultLabelValueTrue,
+		"llm-d.ai/accelerator-variant": defaultAcceleratorVariantValue,
 	}
 
 	envVars := []corev1.EnvVar{

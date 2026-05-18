@@ -6,6 +6,7 @@ resources:
 - cluster-monitoring-view-binding.yaml
 - metrics-reader-token.yaml
 - prometheus-metrics-reader-binding.yaml
+- prometheus-adapter-monitoring.yaml
 
 configMapGenerator:
 - envs:

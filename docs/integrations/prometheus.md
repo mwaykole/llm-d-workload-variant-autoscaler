@@ -1,6 +1,6 @@
 # Prometheus Integration
 
-WVA integrates with Prometheus to collect metrics from vLLM inference servers and expose custom autoscaling metrics. This guide covers Prometheus configuration, metric collection, and security best practices.
+WVA integrates with Prometheus to collect metrics from vLLM inference servers and expose custom autoscaling metrics. In addition, WVA also emits internal metrics for observability (See [Internal Metrics](#internal-metrics)). This guide covers Prometheus configuration, metric collection, and security best practices.
 
 ## Configuration
 
@@ -24,23 +24,23 @@ spec:
         # Required: Prometheus server URL
         - name: PROMETHEUS_BASE_URL
           value: "https://prometheus-k8s.monitoring.svc.cluster.local:9091"
-        
+
         # Optional: TLS configuration
         - name: PROMETHEUS_TLS_INSECURE_SKIP_VERIFY
           value: "false"  # Set to "true" only for testing/development
-        
+
         - name: PROMETHEUS_CA_CERT_PATH
           value: "/etc/prometheus-certs/ca.crt"
-        
+
         - name: PROMETHEUS_CLIENT_CERT_PATH
           value: "/etc/prometheus-certs/client.crt"
-        
+
         - name: PROMETHEUS_CLIENT_KEY_PATH
           value: "/etc/prometheus-certs/client.key"
-        
+
         - name: PROMETHEUS_SERVER_NAME
           value: "prometheus-k8s.monitoring.svc.cluster.local"
-        
+
         # Optional: Bearer token authentication
         - name: PROMETHEUS_BEARER_TOKEN
           valueFrom:
@@ -101,7 +101,7 @@ data:
   ```bash
   # Terminal 1: Port forward Prometheus
   kubectl port-forward -n monitoring svc/prometheus-k8s 9091:9091
-  
+
   # Terminal 2: Set environment for local development
   export PROMETHEUS_BASE_URL=https://127.0.0.1:9091
   export PROMETHEUS_TLS_INSECURE_SKIP_VERIFY=true
@@ -150,6 +150,16 @@ All custom metrics are prefixed with `inferno_` and include labels for `variant_
 ### Optimization Metrics
 
 *No optimization metrics are currently exposed. Optimization timing is logged at DEBUG level.*
+
+### Operational Metrics
+### `wva_available_gpus`
+- **Type**: Gauge
+- **Description**: Number of currently available GPUs group by accelerator type (e.g. "H100", "A100"). Only available in clusters such as OpenShift where WVA can iterate over node objects. In addition, WVA only iterates over node objects when configuration such as `enableLimiter` is `true`.
+- **Labels**:
+  - `accelerator_vendor`: Name of the GPU vendor
+  - `accelerator_model`: Full name of the accelerator
+  - `accelerator_type`: Type of accelerator (short name of the accelerator)
+- **Use Case**: Show number of GPUs discovered by WVA
 
 ### Replica Management Metrics
 
@@ -242,3 +252,12 @@ abs(wva_desired_replicas - wva_current_replicas)
 # Scaling frequency by reason
 rate(wva_replica_scaling_total[5m]) by (reason)
 ```
+
+## Internal Metrics
+### `wva_errors_total`
+- **Type**: Counter
+- **Description**: Total number of errors by WVA components
+- **Labels**:
+  - `component`: Name of the component. The components are `collector`, `analyzer`, `optimizer`, `limiter`, `enforcer`, and `controller`. Currently, this metric is available for `collector`, `enforcer`, `controller`. It will be available for other components as these components handle errors
+  - `error_type`: Short description of the error
+- **Use Case**: Track errors in WVA by components
